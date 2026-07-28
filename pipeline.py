@@ -622,18 +622,21 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
                        temperature: float = 0.7,
                        speed: float = 1.0,
                        speaker_voice_map: dict | None = None,
+                       language: str = "",
                        on_segment=None) -> list[dict]:
     """Синтезирует речь через выбранный движок (plugin system)."""
     if speaker_voice_map:
         results = _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed, temperature,
-                                     on_segment=on_segment, default_engine=engine, default_voice=voice)
+                                     on_segment=on_segment, default_engine=engine, default_voice=voice,
+                                     language=language)
     else:
         plugin = _TTS_PLUGINS.get(engine)
         if not plugin:
             raise ProcessingError(f"TTS движок '{engine}' не найден")
         results = plugin.synthesize(subtitles, out_dir, log, engine=engine, voice=voice,
                                  voice_wav=voice_wav, voice_text=voice_text, seed=seed,
-                                 temperature=temperature, on_segment=on_segment)
+                                 temperature=temperature, language=language,
+                                 on_segment=on_segment)
     if speed != 1.0:
         _apply_tts_speed(results, speed, log)
     return results
@@ -691,7 +694,8 @@ def _apply_tts_speed(results: list[dict], speed: float, log):
 def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
                         speaker_voice_map: dict, seed: int = 44,
                         temperature: float = 0.7, on_segment=None,
-                        default_engine: str = "", default_voice: str = "") -> list[dict]:
+                        default_engine: str = "", default_voice: str = "",
+                        language: str = "") -> list[dict]:
     """Синтезирует речь для нескольких спикеров с разными голосами/движками."""
     log("🔊 Синтезирую речь (мульти-спикер)...")
 
@@ -737,7 +741,8 @@ def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
 
         result = plugin.synthesize(subs, out_dir, log, engine=engine, voice=voice,
                                    voice_wav=voice_wav, voice_text=voice_text,
-                                   seed=seed, temperature=temperature, on_segment=on_segment)
+                                   seed=seed, temperature=temperature, language=language,
+                                   on_segment=on_segment)
         all_results.extend(result)
 
     # Sort by index to restore original order

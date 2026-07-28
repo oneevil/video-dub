@@ -2035,6 +2035,7 @@ def _run_pipeline(job: Job, api_key: str):
                 temperature=job.tts_temperature,
                 speed=job.tts_speed,
                 speaker_voice_map=job.speaker_voice_map,
+                language=job.language,
                 on_segment=_on_tts_segment,
             )
             _emit(job, "step", key="tts", state="done")

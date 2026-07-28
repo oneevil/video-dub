@@ -185,7 +185,7 @@ def _omnivoice_send(proc, cmd, log, on_segment=None, subtitles=None, audio_dir="
 def synthesize(subtitles: list[dict], out_dir: str, log,
                engine: str = "omnivoice",
                voice: str = "", voice_wav: str = "", voice_text: str = "",
-               seed: int = -1, on_segment=None, **kwargs) -> list[dict]:
+               seed: int = -1, language: str = "", on_segment=None, **kwargs) -> list[dict]:
     """Synthesize speech via persistent OmniVoice worker."""
     log("🔊 Синтезирую речь (OmniVoice, 600+ языков)...")
 
@@ -216,6 +216,7 @@ def synthesize(subtitles: list[dict], out_dir: str, log,
             "index": sub["index"],
             "out_path": out_path,
             "seed": seed,
+            "language": language,   # без него модель угадывает язык и может сменить голос
         }
         if voice_wav and os.path.exists(voice_wav):
             cmd["ref_audio"] = voice_wav
