@@ -174,7 +174,7 @@ select {
 .btn-unlock {
   background: none; border: none; cursor: pointer;
   font-size: 14px; padding: 2px 4px; line-height: 1;
-  opacity: .7; transition: opacity .15s;
+  color: var(--fg2); opacity: .7; transition: opacity .15s;
 }
 .btn-unlock:hover { opacity: 1; }
 .skip-check input[type="checkbox"] {
@@ -213,6 +213,9 @@ select {
 .upload-btn:hover { border-color: var(--fg3); color: var(--fg2); }
 .upload-btn.loaded { border-color: var(--accent); color: var(--accent); border-style: solid; }
 .upload-btn.uploading { border-color: var(--blue); color: var(--blue); border-style: solid; pointer-events: none; }
+.btn-delete-subs { background:none;border:none;cursor:pointer;padding:4px;color:var(--fg3);border-radius:4px;display:flex;align-items:center; }
+.btn-delete-subs:hover:not(:disabled) { color:var(--red);background:rgba(239,68,68,.1); }
+.btn-delete-subs:disabled { opacity:.25;cursor:default; }
 .upload-btn.uploading .upload-icon { display: none; }
 .upload-btn .spinner {
   display: none;
@@ -345,6 +348,12 @@ select {
   border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
+.resume-item > span:first-child {
+  flex: 1; min-width: 0; overflow: hidden;
+}
+.resume-item > span:first-child > span {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .resume-item:last-child { border-bottom: none; }
 .resume-item:hover { background: rgba(255,255,255,.04); color: var(--fg); }
 html.light .resume-item:hover { background: rgba(0,0,0,.04); }
@@ -357,12 +366,14 @@ html.light .resume-item:hover { background: rgba(0,0,0,.04); }
 .badge-video { background: rgba(56,189,248,.15); color: var(--blue); }
 .badge-srt { background: rgba(16,185,129,.15); color: var(--accent); }
 .badge-trans { background: rgba(251,191,36,.15); color: var(--yellow); }
-.btn-delete-job {
+.badge-tts { background: rgba(168,85,247,.15); color: #a855f7; }
+.btn-job-action, .btn-delete-job {
   background: none; border: none; cursor: pointer;
   color: var(--fg3); padding: 4px; border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
-  transition: color .15s, background .15s; flex-shrink: 0; margin-left: 4px;
+  transition: color .15s, background .15s; flex-shrink: 0;
 }
+.btn-job-action:hover { color: var(--accent); background: rgba(16,185,129,.1); }
 .btn-delete-job:hover { color: var(--red); background: rgba(248,113,113,.1); }
 
 /* ── Buttons ─────────────────────────────────────── */

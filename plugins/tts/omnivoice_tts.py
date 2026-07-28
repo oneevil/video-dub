@@ -3,6 +3,8 @@ import os
 import sys
 import json
 
+_VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+
 
 ENGINES = {"omnivoice": "OmniVoice (600+ языков, клон голоса)"}
 
@@ -13,18 +15,21 @@ def download_model(engine, model, log_msg):
     """Download OmniVoice venv + model. Yields SSE messages."""
     import json as _json
     import subprocess as _sp
-    python_path = os.path.join(OMNIVOICE_VENV, "bin", "python")
-    pip = os.path.join(OMNIVOICE_VENV, "bin", "pip")
+    from pipeline import venv_ready, mark_venv_ready
+    python_path = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "python")
+    pip = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "pip")
     # 1. Create venv if needed
-    if not os.path.exists(python_path):
+    if not venv_ready(OMNIVOICE_VENV):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение OmniVoice...'})}\n\n"
         _sp.run([sys.executable, "-m", "venv", OMNIVOICE_VENV], check=True)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
-        result = _sp.run([pip, "install", "omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
-                         capture_output=True, text=True)
+        from pipeline import _torch_index_args
+        result = _sp.run([pip, "install"] + _torch_index_args() + ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
+                         capture_output=True, text=True, encoding="utf-8")
         if result.returncode != 0:
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ Ошибка установки: {result.stderr[:500]}'})}\n\n"
             return
+        mark_venv_ready(OMNIVOICE_VENV)
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
     # 2. Check model
     from pipeline import TTS_MODELS_DIR
@@ -34,8 +39,9 @@ def download_model(engine, model, log_msg):
         return
     # 3. Download model
     yield f"data: {_json.dumps({'type': 'log', 'message': '⬇️ Загружаю модель OmniVoice...'})}\n\n"
-    dl_script = f"import os; os.environ['HF_HOME']='{TTS_MODELS_DIR}'; from omnivoice import OmniVoice; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu'); print('OK')"
-    result = _sp.run([python_path, "-c", dl_script], capture_output=True, text=True, timeout=600, cwd="/")
+    dl_script = "from omnivoice import OmniVoice; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu'); print('OK')"
+    result = _sp.run([python_path, "-c", dl_script], capture_output=True, text=True, encoding="utf-8", timeout=600,
+                     cwd=os.path.dirname(OMNIVOICE_VENV), env={**os.environ, "HF_HOME": TTS_MODELS_DIR})
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -50,16 +56,75 @@ _omnivoice_proc = None  # Persistent worker process
 
 def _setup_omnivoice_venv(log):
     """Create isolated venv for OmniVoice with transformers>=5.3."""
-    if os.path.exists(os.path.join(OMNIVOICE_VENV, "bin", "python")):
+    from pipeline import venv_ready, mark_venv_ready
+    if venv_ready(OMNIVOICE_VENV):
         return  # Already set up
     log("   📦 Создаю изолированное окружение для OmniVoice...")
     import subprocess as _sp
     _sp.run([sys.executable, "-m", "venv", OMNIVOICE_VENV], check=True)
-    pip = os.path.join(OMNIVOICE_VENV, "bin", "pip")
+    pip = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "pip")
     log("   📦 Устанавливаю OmniVoice + зависимости...")
-    _sp.run([pip, "install", "--quiet", "omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
+    from pipeline import _torch_index_args
+    _sp.run([pip, "install", "--quiet"] + _torch_index_args() + ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
             check=True, capture_output=True)
+    mark_venv_ready(OMNIVOICE_VENV)
     log("   ✅ OmniVoice окружение готово")
+
+
+def _err_text(proc) -> str:
+    return "\n".join(getattr(proc, "_err_tail", []))
+
+
+def _start_readers(proc):
+    """Читаем stdout в очередь, stderr — в фоновый буфер.
+
+    Оба потока обязательны: труба всего 16 КБ, и как только tqdm/варнинги её
+    заполнят, воркер навсегда блокируется на записи (выглядит как зависание).
+    """
+    import queue as _q
+    import threading as _th
+    from pipeline import drain_stderr
+
+    proc._err_tail = drain_stderr(proc)
+    out_q: "_q.Queue" = _q.Queue()
+
+    def _read_stdout():
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out_q.put(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        except Exception:
+            pass
+        out_q.put(None)  # EOF — процесс завершился
+
+    _th.Thread(target=_read_stdout, daemon=True).start()
+    proc._out_q = out_q
+
+
+def _read_msg(proc, log, what: str, heartbeat: int = 20):
+    """Ждёт следующее сообщение воркера, напоминая в лог, что работа идёт."""
+    import queue as _q
+    import time as _t
+    started = _t.monotonic()
+    while True:
+        try:
+            msg = proc._out_q.get(timeout=heartbeat)
+        except _q.Empty:
+            log(f"   ⏳ {what}... ({int(_t.monotonic() - started)}с)")
+            continue
+        if msg is None:
+            raise RuntimeError(
+                f"OmniVoice worker завершился (код {proc.poll()}): {_err_text(proc)[-500:]}")
+        if msg.get("type") == "log":
+            log(msg["message"])
+            started = _t.monotonic()
+            continue
+        return msg
 
 
 def _get_omnivoice_worker(log):
@@ -71,8 +136,10 @@ def _get_omnivoice_worker(log):
         return _omnivoice_proc  # Still running
 
     _setup_omnivoice_venv(log)
+    # осиротевшие воркеры завершаются сами: они видят EOF на stdin (см.
+    # _stdin_lines в omnivoice_worker.py), это работает на всех ОС
     worker = os.path.join(os.path.dirname(__file__), "omnivoice_worker.py")
-    python = os.path.join(OMNIVOICE_VENV, "bin", "python")
+    python = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "python")
     from pipeline import TTS_MODELS_DIR
     cache_dir = TTS_MODELS_DIR
     os.makedirs(cache_dir, exist_ok=True)
@@ -80,30 +147,19 @@ def _get_omnivoice_worker(log):
     _omnivoice_proc = _sp.Popen(
         [python, worker, "--cache_dir", cache_dir],
         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
-        text=True, bufsize=1
+        text=True, encoding="utf-8", bufsize=1,
+        env={**os.environ, "HF_HOME": cache_dir},
     )
+    _start_readers(_omnivoice_proc)
 
-    # Wait for "ready" signal
-    for line in _omnivoice_proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-            if msg.get("type") == "log":
-                log(msg["message"])
-            elif msg.get("type") == "ready":
-                break
-            elif msg.get("type") == "error":
-                raise RuntimeError(f"OmniVoice: {msg.get('message', '')}")
-        except json.JSONDecodeError:
-            pass
-
-    # Check if process died during startup
-    if _omnivoice_proc.poll() is not None:
-        stderr = _omnivoice_proc.stderr.read() if _omnivoice_proc.stderr else ""
-        _omnivoice_proc = None
-        raise RuntimeError(f"OmniVoice worker не запустился: {stderr[:500]}")
+    # Ждём "ready" (первая загрузка модели на MPS занимает несколько минут)
+    while True:
+        msg = _read_msg(_omnivoice_proc, log, "OmniVoice загружается")
+        if msg.get("type") == "ready":
+            break
+        if msg.get("type") == "error":
+            _omnivoice_proc = None
+            raise RuntimeError(f"OmniVoice: {msg.get('message', '')}")
 
     return _omnivoice_proc
 
@@ -112,33 +168,18 @@ def _omnivoice_send(proc, cmd, log, on_segment=None, subtitles=None, audio_dir="
     """Send command to worker and read response(s)."""
     # Check if worker is still alive
     if proc.poll() is not None:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"OmniVoice worker завершился (код {proc.returncode}): {stderr[:500]}")
+        raise RuntimeError(f"OmniVoice worker завершился (код {proc.returncode}): {_err_text(proc)[-500:]}")
     try:
         proc.stdin.write(json.dumps(cmd, ensure_ascii=False) + "\n")
         proc.stdin.flush()
     except BrokenPipeError:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"OmniVoice worker упал: {stderr[:500]}")
+        raise RuntimeError(f"OmniVoice worker упал: {_err_text(proc)[-500:]}")
 
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-            if msg.get("type") == "log":
-                log(msg["message"])
-            elif msg.get("type") in ("segment", "warmed_up"):
-                return msg
-            elif msg.get("type") == "error":
-                log(f"   ❌ {msg.get('message', '')}")
-                return msg
-            elif msg.get("type") == "done":
-                return msg
-        except json.JSONDecodeError:
-            pass
-    return None
+    what = "Прогрев модели" if cmd.get("cmd") == "warmup" else "Синтез речи"
+    msg = _read_msg(proc, log, what)
+    if msg.get("type") == "error":
+        log(f"   ❌ {msg.get('message', '')}")
+    return msg
 
 
 def synthesize(subtitles: list[dict], out_dir: str, log,

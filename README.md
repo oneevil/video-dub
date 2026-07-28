@@ -6,11 +6,12 @@
 
 - Скачивание видео по URL (yt-dlp) или загрузка локального файла
 - Разделение голоса и фона (demucs) — опционально
-- Транскрипция: OpenAI Whisper, Faster Whisper, WhisperX (с диаризацией), Whisper API
+- Транскрипция: OpenAI Whisper, Faster Whisper, WhisperX (с диаризацией), Whisper API, ElevenLabs Scribe
 - Перевод: Claude, OpenAI, Google Translate, Ollama, Custom OpenAI-совместимый API
-- Синтез речи: Qwen3-TTS Base (клон голоса), Qwen3-TTS CustomVoice (встроенные), Edge TTS (Microsoft), OmniVoice (600+ языков), macOS Say
+- Синтез речи: Qwen3-TTS Base/CustomVoice, Edge TTS, OmniVoice (600+ языков), ElevenLabs (облако), Fish Audio (облако), macOS Say
+- **Lip Sync**: LatentSync — синхронизация губ по аудио (CUDA, на CPU медленно)
 - **Мульти-спикер**: определение говорящих (WhisperX + pyannote), назначение голоса каждому спикеру, ручная смена спикера
-- Клонирование голоса из референс WAV с тестом
+- Клонирование голоса из референс WAV (локально + облачно через ElevenLabs IVC / Fish Audio)
 - Настраиваемый seed интонации и temperature для стабильного стиля озвучки
 - Поштучная и пакетная генерация TTS с real-time обновлением UI
 - Real-time отображение субтитров при транскрипции и переводе
@@ -19,13 +20,15 @@
 - Аудио редактор с waveform, отдельными дорожками для каждого спикера, перетаскиванием TTS-сегментов
 - Сборка видео: полный timeline, замедление, микширование, диапазон, вшивание субтитров
 - Микширование: без оригинала / полное аудио фоном / только фон без голоса (demucs)
+- **Закадровый перевод**: фон + приглушённый оригинальный голос + перевод (настраиваемые громкости)
 - Плавные переходы громкости на границах TTS-сегментов
+- Переключение оригинального/переведённого видео в плеере
+- Синхронизация аудио дорожек (фон, голос) в плеере в зависимости от настроек
 - Информация о видео (разрешение, кодек, битрейт, FPS)
 - Скачивание исходного и переведённого видео
 - Управление проектами: открытие, закрытие, переименование, удаление
 - Загрузка и управление моделями через веб-интерфейс
-- **Закадровый перевод**: фон + приглушённый оригинальный голос + перевод (настраиваемые громкости)
-- **Плагин-система**: транскрипция, перевод и TTS — подключаемые модули
+- **Плагин-система**: транскрипция, перевод, TTS, lip sync — подключаемые модули
 - **Изолированные окружения**: каждый ML-движок в своём venv (без конфликтов зависимостей)
 - SVG иконки по всему интерфейсу
 - Поддержка CUDA (Windows/Linux), MPS (macOS Apple Silicon), CPU
@@ -33,46 +36,98 @@
 
 ## Установка
 
-### 1. Системные зависимости
+### 1. Установка uv
 
+[uv](https://docs.astral.sh/uv/) — быстрый менеджер Python пакетов и окружений.
+
+**macOS / Linux:**
 ```bash
-# macOS
-brew install ffmpeg yt-dlp
-
-# Ubuntu/Debian
-sudo apt install ffmpeg
-pip install yt-dlp
-
-# Windows
-# Установите ffmpeg и yt-dlp, добавьте в PATH
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Настройка
+**Windows (PowerShell):**
+```
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+После установки перезапустите терминал. Проверьте: `uv --version`
+
+### 2. Системные зависимости
+
+**macOS:**
+```bash
+brew install ffmpeg yt-dlp
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install ffmpeg
+pip install yt-dlp
+```
+
+**Windows (scoop):**
+
+Установка scoop (если ещё не установлен): https://scoop.sh
+```
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+irm get.scoop.sh | iex
+```
+
+```
+scoop install ffmpeg-shared yt-dlp
+```
+
+> **Важно:** устанавливайте именно `ffmpeg-shared`, а не `ffmpeg`. ML-библиотеки (torchcodec) требуют FFmpeg DLL-файлы (`avcodec-*.dll`, `avformat-*.dll`). Обычный `scoop install ffmpeg` ставит статическую сборку без DLL.
+>
+> Альтернатива: скачайте `ffmpeg-release-full-shared` с [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), распакуйте, добавьте папку `bin/` в системный `PATH`.
+>
+> Проверка: `where avcodec-62.dll` — должен найти файл.
+
+### 3. Установка CUDA (Windows — для GPU ускорения)
+
+CUDA необходима для ускорения ML-моделей (Whisper, TTS, LatentSync) на видеокартах NVIDIA.
+
+1. Проверьте что у вас установлен драйвер NVIDIA: `nvidia-smi`
+2. Скачайте [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (рекомендуется 12.4+)
+3. Установите, следуя инструкциям инсталлятора
+4. Добавьте в PATH (обычно автоматически):
+   - `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`
+   - `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\libnvvp`
+5. Перезагрузите компьютер
+6. Проверьте установку:
+   ```
+   nvcc --version
+   nvidia-smi
+   ```
+
+> **Примечание:** cuDNN устанавливать отдельно не нужно — PyTorch включает его в свои пакеты.
+
+### 4. Настройка
 
 ```bash
 cp .env.example .env
 # Отредактируйте .env или настройте через веб-интерфейс
 ```
 
-### 3. Установка
+### 5. Установка и запуск
 
 ```bash
 # Основной проект (лёгкий — Flask, API клиенты)
 uv sync
 
-# Все ML-окружения сразу (Whisper, WhisperX, Qwen3, OmniVoice, demucs)
-uv run python setup_all.py
-```
-
-> ML-окружения также создаются автоматически при первом использовании каждого движка.
-
-### 4. Запуск
-
-```bash
+# Запуск
 uv run python app.py
 ```
 
-Откроется на http://localhost:5000
+Откроется на http://localhost:5050
+
+### 6. ML-окружения (опционально)
+
+ML-окружения создаются автоматически при первом использовании каждого движка. Но можно установить все заранее:
+
+```bash
+uv run python setup_all.py
+```
 
 ---
 
@@ -90,6 +145,8 @@ uv run python app.py
 | `CUSTOM_API_URL` | URL custom API | — |
 | `OLLAMA_URL` | URL Ollama | `http://localhost:11434` |
 | `HF_TOKEN` | HuggingFace токен для диаризации (WhisperX) | — |
+| `ELEVENLABS_API_KEY` | API ключ ElevenLabs (TTS) | — |
+| `FISH_API_KEY` | API ключ Fish Audio (TTS) | — |
 
 ### Транскрипция
 
@@ -131,6 +188,13 @@ uv run python app.py
 | `BUILD_BURN_SUBS` | Вшить субтитры в видео | `false` |
 | `OUTPUT_DIR` | Папка для результатов | `./projects` |
 
+### Lip Sync
+
+| Переменная | Описание | По умолчанию |
+|-----------|----------|-------------|
+| `LIPSYNC_ENABLED` | Включить синхронизацию губ | `false` |
+| `LIPSYNC_ENGINE` | Движок lip sync | `latentsync` |
+
 ---
 
 ## Архитектура
@@ -139,14 +203,15 @@ uv run python app.py
 |-----|-----------|----------|
 | 1. Скачивание | yt-dlp / загрузка | Видео из URL или локальный файл |
 | 2. Разделение | demucs (опц.) | Голос + фон без голоса |
-| 3. Транскрипция | Плагины | 4 движка, WhisperX с диаризацией спикеров |
+| 3. Транскрипция | Плагины | 5 движков, WhisperX с диаризацией спикеров |
 | 4. Перевод | Плагины | 5 провайдеров, чанками по 50 фраз |
-| 5. TTS | Плагины | 5 движков, мульти-спикер, клонирование |
+| 5. TTS | Плагины | 7 движков, мульти-спикер, клонирование |
 | 6. Сборка | FFmpeg | Полный timeline + замедление + микширование |
+| 7. Lip Sync | LatentSync (опц.) | Синхронизация губ по аудио |
 
 ### Плагин-система
 
-Все движки транскрипции, перевода и TTS реализованы как плагины — файлы `.py` в соответствующих папках. Чтобы добавить новый движок — создайте файл. Чтобы удалить — удалите файл.
+Все движки транскрипции, перевода, TTS и lip sync реализованы как плагины — файлы `.py` в соответствующих папках. Чтобы добавить новый движок — создайте файл. Чтобы удалить — удалите файл.
 
 ```
 plugins/
@@ -157,6 +222,7 @@ plugins/
 │   ├── faster_whisper.py        # Faster Whisper (.venv-faster-whisper)
 │   ├── faster_whisper_worker.py # Worker-процесс
 │   ├── whisper_api.py           # OpenAI Whisper API (облако, без venv)
+│   ├── elevenlabs_stt.py        # ElevenLabs Scribe (облако, без venv)
 │   ├── whisperx_plugin.py       # WhisperX + диаризация (.venv-whisperx)
 │   └── whisperx_worker.py       # Worker-процесс
 ├── translate/                   # Провайдеры перевода (без отд. venv)
@@ -167,14 +233,20 @@ plugins/
 │   ├── google.py                # Google Translate
 │   ├── ollama.py                # Ollama (локальный)
 │   └── custom_api.py            # Custom OpenAI-совместимый
-└── tts/                         # TTS движки
+├── tts/                         # TTS движки
+│   ├── __init__.py              # Авто-обнаружение плагинов
+│   ├── qwen3.py                 # Qwen3-TTS (.venv-qwen3)
+│   ├── qwen3_worker.py          # Persistent worker-процесс
+│   ├── edge.py                  # Edge TTS (без venv)
+│   ├── elevenlabs.py            # ElevenLabs (облако, без venv)
+│   ├── fish_audio.py            # Fish Audio (облако, без venv)
+│   ├── macos_say.py             # macOS Say (системный)
+│   ├── omnivoice_tts.py         # OmniVoice (.venv-omnivoice)
+│   └── omnivoice_worker.py      # Persistent worker-процесс
+└── lipsync/                     # Lip Sync движки
     ├── __init__.py              # Авто-обнаружение плагинов
-    ├── qwen3.py                 # Qwen3-TTS (.venv-qwen3)
-    ├── qwen3_worker.py          # Persistent worker-процесс
-    ├── edge.py                  # Edge TTS (без venv)
-    ├── macos_say.py             # macOS Say (системный)
-    ├── omnivoice_tts.py         # OmniVoice (.venv-omnivoice)
-    └── omnivoice_worker.py      # Persistent worker-процесс
+    ├── latentsync.py            # LatentSync (.venv-latentsync)
+    └── _latentsync_runner.py    # Inference-скрипт (CPU/CUDA)
 ```
 
 **Контракт плагина транскрипции:**
@@ -207,6 +279,14 @@ def download_model(engine, model, log) -> generator  # опционально
 def check_available() -> bool  # опционально
 ```
 
+**Контракт плагина lip sync:**
+```python
+ENGINES = {"engine-id": "Display Name"}  # обязательно
+def process(video_path, audio_path, out_path, log, **kwargs) -> str  # обязательно — возвращает путь к результату
+def setup(log) -> None  # опционально — установка зависимостей
+def check_available() -> bool  # опционально
+```
+
 ### Изолированные окружения
 
 Каждый ML-движок работает в своём виртуальном окружении через worker-процессы. Основной проект лёгкий — только Flask, API клиенты, edge-tts.
@@ -219,6 +299,7 @@ def check_available() -> bool  # опционально
 | `.venv-qwen3` | qwen-tts, transformers, torch | при первом запуске Qwen3-TTS |
 | `.venv-omnivoice` | omnivoice, torch | при первом запуске OmniVoice |
 | `.venv-demucs` | demucs, torch | при первом разделении голоса |
+| `.venv-latentsync` | torch, diffusers, kornia, insightface | при первом запуске LatentSync |
 
 Все окружения можно создать заранее: `uv run python setup_all.py`
 
@@ -230,6 +311,15 @@ def check_available() -> bool  # опционально
 - **Переведённый голос** (TTS) — 100%
 
 В промежутках между субтитрами оригинальный спикер слышен на фоне. На TTS-сегментах все три дорожки микшируются.
+
+### Lip Sync (LatentSync)
+
+LatentSync — модель синхронизации губ по аудио от ByteDance. Автоматически скачивает репозиторий, создаёт окружение и загружает модель при первом использовании.
+
+- **CUDA (рекомендуется)**: ~30 сек на 10 сек видео (RTX 4090)
+- **CPU**: работает, но крайне медленно (десятки минут)
+- **macOS**: поддерживается на CPU (MPS не поддерживается LatentSync)
+- Доступен только в режимах аудио "Без оригинала" и "Только фон"
 
 ### Мульти-спикер
 
@@ -246,6 +336,8 @@ def check_available() -> bool  # опционально
 | Qwen3-TTS Base | Локально | Да (WAV референс) | Нет |
 | Qwen3-TTS CustomVoice | Локально | Нет | Vivian, Ryan, Aiden и др. |
 | Edge TTS | Облако (бесплатно) | Нет | 300+ голосов на всех языках |
+| ElevenLabs | Облако (API ключ) | Да (IVC, сохраняется) | Голоса из аккаунта |
+| Fish Audio | Облако (API ключ) | Да (модель, сохраняется) | 1.6M+ публичных моделей |
 | OmniVoice | Локально (отд. venv) | Да (WAV референс) | Voice design (instruct) |
 | macOS Say | Системный (macOS) | Нет | Системные голоса |
 
@@ -269,20 +361,25 @@ video-dub/
 ├── plugins/
 │   ├── transcribe/         # Плагины транскрипции + workers
 │   ├── translate/          # Плагины перевода
-│   └── tts/                # Плагины TTS + workers
+│   ├── tts/                # Плагины TTS + workers
+│   └── lipsync/            # Плагины lip sync
 ├── .venv-whisper/          # OpenAI Whisper (создаётся автоматически)
 ├── .venv-faster-whisper/   # Faster Whisper
 ├── .venv-whisperx/         # WhisperX + pyannote
 ├── .venv-qwen3/            # Qwen3-TTS
 ├── .venv-omnivoice/        # OmniVoice
 ├── .venv-demucs/           # Demucs
+├── .venv-latentsync/       # LatentSync
+├── .latentsync/            # LatentSync репозиторий (клонируется автоматически)
 ├── models/
 │   ├── whisper/
 │   │   ├── openai/         # OpenAI Whisper модели (.pt)
 │   │   ├── faster-whisper/ # Faster Whisper модели
 │   │   └── whisperx/       # WhisperX + align + diarize модели
-│   └── tts/
-│       └── hub/            # TTS модели (HuggingFace)
+│   ├── tts/
+│   │   └── hub/            # TTS модели (HuggingFace)
+│   └── lipsync/
+│       └── latentsync/     # LatentSync модель (скачивается автоматически)
 ├── voices/                 # Клонированные голоса (WAV + meta.json)
 └── projects/               # Результаты
     └── job_*/

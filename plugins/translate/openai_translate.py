@@ -6,16 +6,33 @@ ENGINES = {"openai": "OpenAI"}
 API_KEY_ENV = "OPENAI_API_KEY"
 NEEDS_MODEL = True
 
-MODELS = [
-    {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini"},
-    {"id": "gpt-4.1-nano", "name": "GPT-4.1 Nano"},
-    {"id": "gpt-4.1", "name": "GPT-4.1"},
-    {"id": "gpt-4o", "name": "GPT-4o"},
-    {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
-    {"id": "o3-mini", "name": "o3 Mini"},
-]
-
-DEFAULT_MODEL = "gpt-4.1-mini"
+def list_models(api_key: str = "") -> list[dict]:
+    """Fetch available models from OpenAI API. Returns list of {id, name} dicts."""
+    if not api_key:
+        return []
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key)
+        result = []
+        for m in client.models.list().data:
+            mid = m.id
+            # Filter to chat/text models only (skip embeddings, tts, whisper, dall-e, etc.)
+            if any(p in mid for p in ("embedding", "tts", "whisper", "dall-e", "audio", "moderation", "image")):
+                continue
+            if mid.startswith(("gpt-", "o1", "o3", "chatgpt-")):
+                result.append({"id": mid, "name": mid})
+        # Sort: gpt-5 first, then gpt-4, then o3/o1, then gpt-3
+        def _sort_key(item):
+            mid = item["id"]
+            if mid.startswith("gpt-5"): return (0, mid)
+            if mid.startswith("gpt-4"): return (1, mid)
+            if mid.startswith("o3"): return (2, mid)
+            if mid.startswith("o1"): return (3, mid)
+            return (4, mid)
+        result.sort(key=_sort_key)
+        return result
+    except Exception:
+        return []
 
 
 def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
@@ -23,7 +40,8 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
     import openai
     from ._helpers import build_translate_prompt, parse_numbered_response
 
-    model = model or DEFAULT_MODEL
+    if not model:
+        raise ValueError("Не выбрана модель OpenAI. Откройте настройки и выберите модель.")
     log(f"🌐 Перевожу на {target_lang} через OpenAI ({model})...")
     client = openai.OpenAI(api_key=api_key)
 

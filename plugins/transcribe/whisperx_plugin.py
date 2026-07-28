@@ -4,6 +4,15 @@ import sys
 import json
 import subprocess as _sp
 
+_VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+
+
+def _safe_cwd():
+    """Не запускаем дочерние процессы из папки проекта: её модули
+    затеняют библиотеки. «/» на Windows — корень текущего диска."""
+    import tempfile
+    return tempfile.gettempdir()
+
 
 ENGINES = {"whisperx": "WhisperX + Диаризация (локально)"}
 
@@ -31,25 +40,27 @@ def _get_models_dir():
 
 
 def _get_python():
-    return os.path.join(WHISPERX_VENV, "bin", "python")
+    return os.path.join(WHISPERX_VENV, _VENV_BIN, "python")
 
 
 def _get_pip():
-    return os.path.join(WHISPERX_VENV, "bin", "pip")
+    return os.path.join(WHISPERX_VENV, _VENV_BIN, "pip")
 
 
 def _setup_venv(log):
     """Create isolated venv for WhisperX if needed."""
-    python = _get_python()
-    if os.path.exists(python):
+    from pipeline import venv_ready, mark_venv_ready
+    if venv_ready(WHISPERX_VENV):
         return
     log("   📦 Создаю изолированное окружение WhisperX...")
     _sp.run([sys.executable, "-m", "venv", WHISPERX_VENV], check=True)
     log("   📦 Устанавливаю WhisperX + зависимости...")
-    result = _sp.run([_get_pip(), "install", "--quiet"] + _WHISPERX_DEPS,
-                     capture_output=True, text=True)
+    from pipeline import _torch_index_args
+    result = _sp.run([_get_pip(), "install", "--quiet"] + _torch_index_args() + _WHISPERX_DEPS,
+                     capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise RuntimeError(f"Ошибка установки WhisperX: {result.stderr[:500]}")
+    mark_venv_ready(WHISPERX_VENV)
     log("   ✅ WhisperX окружение готово")
 
 
@@ -61,15 +72,18 @@ def download_model(engine, model, log_msg):
     python = _get_python()
 
     # Ensure venv exists
-    if not os.path.exists(python):
+    from pipeline import venv_ready, mark_venv_ready
+    if not venv_ready(WHISPERX_VENV):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение WhisperX...'})}\n\n"
         _sp.run([sys.executable, "-m", "venv", WHISPERX_VENV], check=True)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
-        result = _sp.run([_get_pip(), "install"] + _WHISPERX_DEPS,
-                         capture_output=True, text=True)
+        from pipeline import _torch_index_args
+        result = _sp.run([_get_pip(), "install"] + _torch_index_args() + _WHISPERX_DEPS,
+                         capture_output=True, text=True, encoding="utf-8")
         if result.returncode != 0:
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ Ошибка установки: {result.stderr[:500]}'})}\n\n"
             return
+        mark_venv_ready(WHISPERX_VENV)
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
 
     if engine == "whisperx":
@@ -79,14 +93,15 @@ def download_model(engine, model, log_msg):
             yield f"data: {_json.dumps({'type': 'done', 'message': f'✅ WhisperX модель {model} уже загружена'})}\n\n"
             return
         yield f"data: {_json.dumps({'type': 'log', 'message': f'⬇️ Загружаю WhisperX модель: {model}...'})}\n\n"
+        _cd = cache_dir.replace('\\', '/')
         script = (
             f"import warnings; warnings.filterwarnings('ignore'); "
             f"import logging; logging.getLogger('pytorch_lightning').setLevel(logging.ERROR); "
             f"import whisperx; "
-            f"whisperx.load_model('{model}', device='cpu', compute_type='int8', download_root='{cache_dir}'); "
+            f"whisperx.load_model('{model}', device='cpu', compute_type='int8', download_root='{_cd}'); "
             f"print('OK')"
         )
-        result = _sp.run([python, "-c", script], capture_output=True, text=True, timeout=600, cwd="/")
+        result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600, cwd=_safe_cwd())
         if result.returncode != 0 or "OK" not in result.stdout:
             err = result.stderr[:500] if result.stderr else result.stdout[:500]
             if "token" in err.lower() or "401" in err or "auth" in err.lower():
@@ -102,8 +117,9 @@ def download_model(engine, model, log_msg):
             yield f"data: {_json.dumps({'type': 'done', 'message': '✅ Align модель уже загружена'})}\n\n"
             return
         yield f"data: {_json.dumps({'type': 'log', 'message': f'⬇️ Загружаю Align модель (wav2vec2) для языка: {model}...'})}\n\n"
-        script = f"import whisperx; whisperx.load_align_model(language_code='{model}', device='cpu', model_dir='{cache_dir}'); print('OK')"
-        result = _sp.run([python, "-c", script], capture_output=True, text=True, timeout=300, cwd="/")
+        _cd = cache_dir.replace('\\', '/')
+        script = f"import whisperx; whisperx.load_align_model(language_code='{model}', device='cpu', model_dir='{_cd}'); print('OK')"
+        result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=300, cwd=_safe_cwd())
         if result.returncode != 0 or "OK" not in result.stdout:
             err = result.stderr[:500] if result.stderr else result.stdout[:500]
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -121,12 +137,13 @@ def download_model(engine, model, log_msg):
             yield f"data: {_json.dumps({'type': 'error', 'message': '❌ HF_TOKEN не задан. Укажите в настройках транскрипции.'})}\n\n"
             return
         yield f"data: {_json.dumps({'type': 'log', 'message': '⬇️ Загружаю Diarization модель (pyannote)...'})}\n\n"
+        _cd = cache_dir.replace('\\', '/')
         script = (
             f"from whisperx.diarize import DiarizationPipeline; "
-            f"DiarizationPipeline(token='{hf_tok}', device='cpu', cache_dir='{cache_dir}'); "
+            f"DiarizationPipeline(token='{hf_tok}', device='cpu', cache_dir='{_cd}'); "
             f"print('OK')"
         )
-        result = _sp.run([python, "-c", script], capture_output=True, text=True, timeout=300, cwd="/")
+        result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=300, cwd=_safe_cwd())
         if result.returncode != 0 or "OK" not in result.stdout:
             err = result.stderr[:500] if result.stderr else result.stdout[:500]
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -188,7 +205,9 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
     if hf_token:
         cmd += ["--hf_token", hf_token]
 
-    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, bufsize=1, cwd="/")
+    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd())
+    from pipeline import drain_stderr
+    err_tail = drain_stderr(proc)
 
     subtitles = None
     for line in proc.stdout:
@@ -208,7 +227,7 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
 
     proc.wait()
     if proc.returncode != 0 and subtitles is None:
-        stderr = proc.stderr.read() if proc.stderr else ""
+        stderr = "\n".join(err_tail)
         raise RuntimeError(f"WhisperX worker завершился с ошибкой: {stderr[:500]}")
 
     if subtitles is None:

@@ -4,6 +4,15 @@ import json
 import sys
 import subprocess as _sp
 
+_VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+
+
+def _safe_cwd():
+    """Не запускаем дочерние процессы из папки проекта: её модули
+    затеняют библиотеки. «/» на Windows — корень текущего диска."""
+    import tempfile
+    return tempfile.gettempdir()
+
 
 ENGINES = {
     "qwen3-1.7b-base":   "Qwen3-TTS 1.7B Base (клон голоса)",
@@ -40,35 +49,40 @@ _qwen3_proc = None  # Persistent worker
 
 
 def _get_python():
-    return os.path.join(QWEN3_VENV, "bin", "python")
+    return os.path.join(QWEN3_VENV, _VENV_BIN, "python")
 
 
 def _setup_venv(log):
-    python = _get_python()
-    if os.path.exists(python):
+    from pipeline import venv_ready, mark_venv_ready
+    if venv_ready(QWEN3_VENV):
         return
     log("   📦 Создаю окружение Qwen3-TTS...")
     _sp.run([sys.executable, "-m", "venv", QWEN3_VENV], check=True)
     log("   📦 Устанавливаю зависимости...")
-    result = _sp.run([os.path.join(QWEN3_VENV, "bin", "pip"), "install", "--quiet"] + _DEPS,
-                     capture_output=True, text=True)
+    from pipeline import _torch_index_args
+    result = _sp.run([os.path.join(QWEN3_VENV, _VENV_BIN, "pip"), "install", "--quiet"] + _torch_index_args() + _DEPS,
+                     capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise RuntimeError(f"Ошибка установки Qwen3-TTS: {result.stderr[:500]}")
+    mark_venv_ready(QWEN3_VENV)
     log("   ✅ Окружение готово")
 
 
 def download_model(engine, model, log_msg):
     import json as _json
     python = _get_python()
-    if not os.path.exists(python):
+    from pipeline import venv_ready, mark_venv_ready
+    if not venv_ready(QWEN3_VENV):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение Qwen3-TTS...'})}\n\n"
         _sp.run([sys.executable, "-m", "venv", QWEN3_VENV], check=True)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
-        r = _sp.run([os.path.join(QWEN3_VENV, "bin", "pip"), "install"] + _DEPS,
-                    capture_output=True, text=True)
+        from pipeline import _torch_index_args
+        r = _sp.run([os.path.join(QWEN3_VENV, _VENV_BIN, "pip"), "install"] + _torch_index_args() + _DEPS,
+                    capture_output=True, text=True, encoding="utf-8")
         if r.returncode != 0:
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {r.stderr[:500]}'})}\n\n"
             return
+        mark_venv_ready(QWEN3_VENV)
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
 
     hf_model = MODELS.get(engine.replace("tts-", ""), "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
@@ -85,8 +99,8 @@ def download_model(engine, model, log_msg):
         f"sys.stdout = sys.__stdout__; "
         f"Qwen3TTSModel.from_pretrained('{hf_model}'); print('OK')"
     )
-    result = _sp.run([python, "-c", script], capture_output=True, text=True, timeout=600,
-                     cwd="/", env={**os.environ, "HF_HOME": TTS_MODELS_DIR})
+    result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600,
+                     cwd=_safe_cwd(), env={**os.environ, "HF_HOME": TTS_MODELS_DIR})
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -110,8 +124,11 @@ def _get_worker(log):
     _qwen3_proc = _sp.Popen(
         [python, worker, "--cache_dir", TTS_MODELS_DIR],
         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
-        text=True, bufsize=1, cwd="/"
+        text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd()
     )
+    # stderr обязательно вычитывать, иначе воркер зависнет на заполненной трубе
+    from pipeline import drain_stderr
+    _qwen3_proc._err_tail = drain_stderr(_qwen3_proc)
 
     # Wait for ready
     for line in _qwen3_proc.stdout:
@@ -130,7 +147,7 @@ def _get_worker(log):
             pass
 
     if _qwen3_proc.poll() is not None:
-        stderr = _qwen3_proc.stderr.read() if _qwen3_proc.stderr else ""
+        stderr = "\n".join(getattr(_qwen3_proc, "_err_tail", []))
         _qwen3_proc = None
         raise RuntimeError(f"Qwen3 worker не запустился: {stderr[:500]}")
 
@@ -140,13 +157,13 @@ def _get_worker(log):
 def _send(proc, cmd, log):
     """Send command to worker and read responses until terminal message."""
     if proc.poll() is not None:
-        stderr = proc.stderr.read() if proc.stderr else ""
+        stderr = "\n".join(getattr(proc, "_err_tail", []))
         raise RuntimeError(f"Qwen3 worker завершился: {stderr[:500]}")
     try:
         proc.stdin.write(json.dumps(cmd, ensure_ascii=False) + "\n")
         proc.stdin.flush()
     except BrokenPipeError:
-        stderr = proc.stderr.read() if proc.stderr else ""
+        stderr = "\n".join(getattr(proc, "_err_tail", []))
         raise RuntimeError(f"Qwen3 worker упал: {stderr[:500]}")
 
     for line in proc.stdout:

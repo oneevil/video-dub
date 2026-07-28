@@ -24,6 +24,31 @@ def _out(msg):
     print(json.dumps(msg, ensure_ascii=False), flush=True)
 
 
+def _stdin_lines():
+    """Читает команды из stdin в фоне и отдаёт их главному циклу.
+
+    Отдельный поток нужен, чтобы заметить смерть родителя (EOF) даже пока
+    главный поток занят загрузкой модели: иначе воркер остаётся сиротой,
+    держит модель в памяти и конкурирует за GPU. Работает на всех ОС —
+    в отличие от поиска процессов через ps.
+    """
+    import queue as _q
+    import threading as _th
+    q: "_q.Queue" = _q.Queue()
+
+    def _read():
+        try:
+            for line in sys.stdin:
+                q.put(line)
+        except Exception:
+            pass
+        os._exit(0)  # родитель закрыл канал — уходим немедленно
+
+    _th.Thread(target=_read, daemon=True).start()
+    while True:
+        yield q.get()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache_dir", default="")
@@ -73,7 +98,7 @@ def main():
     _out({"type": "log", "message": f"📦 Qwen3 worker запущен ({device})"})
     _out({"type": "ready"})
 
-    for line in sys.stdin:
+    for line in _stdin_lines():
         line = line.strip()
         if not line:
             continue

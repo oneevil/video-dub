@@ -56,8 +56,14 @@ let subtitles = [];
 let syncInterval = null;
 let uploadedOriginal = null;
 let uploadedTranslated = null;
+// Есть ли настоящий перевод. Пока его нет, subtitles — это оригиналы, и
+// сохранять/отправлять их как translated.srt нельзя.
+let hasTranslation = false;
 let resumeWorkDir = null;
 let sourceVideoSrc = null;
+let outputVideoPath = null;
+let _playerShowingOutput = false;
+let originalSubs = [];
 const _svgUpload = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
 const _svgCheck = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>';
 function _setUploadState(btnId, iconId, loaded) {
@@ -65,6 +71,10 @@ function _setUploadState(btnId, iconId, loaded) {
   const icon = document.getElementById(iconId);
   if (loaded) { btn.classList.add('loaded'); if (icon) icon.innerHTML = _svgCheck; }
   else { btn.classList.remove('loaded'); if (icon) icon.innerHTML = _svgUpload; }
+  // Enable/disable delete button
+  const delId = btnId === 'uploadOrigBtn' ? 'deleteOrigBtn' : 'deleteTransBtn';
+  const del = document.getElementById(delId);
+  if (del) del.disabled = !loaded;
 }
 let logMsgCount = 0;
 let _subsScrollLocked = false;
@@ -95,6 +105,29 @@ function addLog(msg, cls) {
   }
 }
 
+function downloadSubs(type) {
+  const subs = type === 'original' ? originalSubs : subtitles;
+  if (!subs.length) return;
+  let srt = '';
+  subs.forEach((s, i) => {
+    const idx = s.index || i + 1;
+    // округляем всю величину: иначе 1.9999 даёт ms=1000 и битый тайм-код
+    const fmt = t => { const total = Math.max(0, Math.round(t*1000)); const h = Math.floor(total/3600000); const m = Math.floor(total%3600000/60000); const sec = Math.floor(total%60000/1000); const ms = total%1000; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')},${String(ms).padStart(3,'0')}`; };
+    srt += `${idx}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n\n`;
+  });
+  const blob = new Blob([srt], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = type === 'original' ? 'original.srt' : 'translated.srt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function _updateSubsDownloadButtons() {
+  document.getElementById('downloadOrigSubs').style.display = originalSubs.length ? '' : 'none';
+  document.getElementById('downloadTransSubs').style.display = (hasTranslation && subtitles.length) ? '' : 'none';
+}
+
 function toggleLog() {
   const panel = document.getElementById('logPanel');
   const handle = document.getElementById('logResizeHandle');
@@ -108,6 +141,17 @@ function toggleLog() {
     body.style.height = '150px';
     document.getElementById('logDot').classList.remove('active');
   }
+}
+
+function downloadLog() {
+  const lines = Array.from(document.querySelectorAll('#log .msg')).map(el => el.textContent);
+  if (!lines.length) return;
+  const blob = new Blob([lines.join('\n')], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'video-dub-log.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 function escHtml(s) {
@@ -175,6 +219,14 @@ function getTranslateModel() {
   return document.getElementById('translateModel').value;
 }
 
+function _renderModelOptions(models, savedId) {
+  const sel = document.getElementById('translateModel');
+  sel.innerHTML = models.map(m =>
+    `<option value="${m.id}" ${m.id === savedId ? 'selected' : ''}>${m.name}</option>`
+  ).join('');
+  return sel.value;
+}
+
 function onProviderChange() {
   const p = document.getElementById('translateProvider').value;
 
@@ -186,22 +238,32 @@ function onProviderChange() {
 
   let modelVal = '';
 
-  // Check if plugin has a model list
+  // Check if plugin has a model list (static fallback)
   const pluginModels = MODEL_LIST[p];
   if (pluginModels && pluginModels.length > 0) {
     document.getElementById('modelField').style.display = 'block';
-    const sel = document.getElementById('translateModel');
-    sel.innerHTML = pluginModels.map(m =>
-      `<option value="${m.id}" ${m.id === savedModel ? 'selected' : ''}>${m.name}</option>`
-    ).join('');
-    modelVal = sel.value;
+    modelVal = _renderModelOptions(pluginModels, savedModel);
   }
 
   // Provider-specific settings
-  if (p === 'claude') {
-    document.getElementById('settingAnthropicKey').style.display = 'block';
-  } else if (p === 'openai') {
-    document.getElementById('settingOpenaiKey').style.display = 'block';
+  if (p === 'claude' || p === 'openai') {
+    if (p === 'claude') document.getElementById('settingAnthropicKey').style.display = 'block';
+    else document.getElementById('settingOpenaiKey').style.display = 'block';
+    // Fetch fresh models from API (uses saved key from .env)
+    document.getElementById('modelField').style.display = 'block';
+    const sel = document.getElementById('translateModel');
+    sel.innerHTML = '<option>Загрузка моделей...</option>';
+    fetch('/translate-models/' + p)
+      .then(r => r.json())
+      .then(d => {
+        if (!d.models || !d.models.length) {
+          sel.innerHTML = '<option value="">Введите API ключ</option>';
+          return;
+        }
+        const newVal = _renderModelOptions(d.models, savedModel);
+        if (newVal !== modelVal) persistSetting({translate_model: newVal});
+      })
+      .catch(() => { sel.innerHTML = '<option value="">Ошибка загрузки</option>'; });
   } else if (p === 'ollama') {
     document.getElementById('ollamaModelField').style.display = 'block';
     document.getElementById('settingOllamaUrl').style.display = 'block';
@@ -224,24 +286,42 @@ function onTtsEngineChange() {
   const isEdge = eng === 'edge-tts';
   const isMacos = eng === 'macos-say';
   const isOmni = eng === 'omnivoice';
+  const isElevenlabs = eng === 'elevenlabs';
+  const isFish = eng === 'fish-audio';
   const isQwen = isBase || isCustom;
   const hasSeed = isQwen || isOmni;
+  const isCloudWithClone = isElevenlabs || isFish;
   document.getElementById('ttsBaseVoiceField').style.display = isCustom ? 'block' : 'none';
   document.getElementById('ttsClonedVoiceField').style.display = (isBase || isOmni) ? 'block' : 'none';
   document.getElementById('ttsEdgeVoiceField').style.display = isEdge ? 'block' : 'none';
   document.getElementById('ttsMacosVoiceField').style.display = isMacos ? 'block' : 'none';
+  document.getElementById('ttsVoiceModeField').style.display = isCloudWithClone ? 'block' : 'none';
   const showSeedRow = hasSeed || isQwen;
   document.getElementById('ttsSeedTempRow').style.display = showSeedRow ? 'grid' : 'none';
   document.getElementById('ttsSeedField').style.display = hasSeed ? 'block' : 'none';
   document.getElementById('ttsTempField').style.display = isQwen ? 'block' : 'none';
+  document.getElementById('ttsElevenlabsKeyField').style.display = isElevenlabs ? 'block' : 'none';
+  document.getElementById('ttsFishKeyField').style.display = isFish ? 'block' : 'none';
   if (isEdge) loadEdgeVoices();
   if (isMacos) loadMacosVoices();
+  if (isCloudWithClone) {
+    document.getElementById('ttsElevenlabsVoice').style.display = isElevenlabs ? 'block' : 'none';
+    document.getElementById('ttsFishVoice').style.display = isFish ? 'block' : 'none';
+    if (isElevenlabs) loadElevenlabsVoices();
+    if (isFish) loadFishVoices();
+    onVoiceModeChange();
+  }
 }
 
 function getTtsSeed() {
-  const cb = document.getElementById('ttsSeedEnabled');
-  if (!cb || !cb.checked) return -1;
-  return parseInt(document.getElementById('ttsSeed').value) || 0;
+  const val = parseInt(document.getElementById('ttsSeed').value) || 0;
+  return val === 0 ? -1 : val;
+}
+
+function onVoiceModeChange() {
+  const mode = document.querySelector('input[name="ttsVoiceMode"]:checked').value;
+  document.getElementById('ttsPresetVoiceWrap').style.display = mode === 'preset' ? 'block' : 'none';
+  document.getElementById('ttsCloneVoiceWrap').style.display = mode === 'clone' ? 'block' : 'none';
 }
 
 function getTtsVoice() {
@@ -249,6 +329,12 @@ function getTtsVoice() {
   if (eng.includes('-custom')) return document.getElementById('ttsBaseVoice').value;
   if (eng === 'edge-tts') return document.getElementById('ttsEdgeVoice').value;
   if (eng === 'macos-say') return document.getElementById('ttsMacosVoice').value;
+  if (eng === 'elevenlabs' || eng === 'fish-audio') {
+    const mode = document.querySelector('input[name="ttsVoiceMode"]:checked').value;
+    if (mode === 'clone') return document.getElementById('ttsCloneVoiceForCloud').value;
+    if (eng === 'elevenlabs') return document.getElementById('ttsElevenlabsVoice').value;
+    return document.getElementById('ttsFishVoice').value;
+  }
   return document.getElementById('ttsVoice').value;
 }
 
@@ -317,6 +403,51 @@ function filterEdgeVoices() {
   sel.value = cur;
 }
 
+// ElevenLabs voices
+let _elevenlabsVoicesLoaded = false, _elevenlabsVoicesAll = [];
+function loadElevenlabsVoices() {
+  if (_elevenlabsVoicesLoaded) return;
+  fetch('/elevenlabs-voices')
+    .then(r => r.json())
+    .then(data => {
+      _elevenlabsVoicesAll = data.voices || [];
+      _elevenlabsVoicesLoaded = true;
+      const sel = document.getElementById('ttsElevenlabsVoice');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">По умолчанию (Rachel)</option>';
+      _elevenlabsVoicesAll.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.id;
+        opt.textContent = `${v.name}${v.lang ? ' — ' + v.lang : ''}`;
+        sel.appendChild(opt);
+      });
+      sel.value = cur;
+    });
+}
+
+// Fish Audio voices
+let _fishVoicesLoaded = false, _fishVoicesAll = [];
+function loadFishVoices() {
+  if (_fishVoicesLoaded) return;
+  const sel = document.getElementById('ttsFishVoice');
+  sel.innerHTML = '<option value="">Загрузка...</option>';
+  fetch('/fish-voices')
+    .then(r => r.json())
+    .then(data => {
+      _fishVoicesAll = data.voices || [];
+      _fishVoicesLoaded = true;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">По умолчанию</option>';
+      _fishVoicesAll.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.id;
+        opt.textContent = `${v.name}${v.lang ? ' — ' + v.lang : ''}`;
+        sel.appendChild(opt);
+      });
+      sel.value = cur;
+    });
+}
+
 // Re-filter voices when language changes
 document.getElementById('language').addEventListener('change', () => {
   if (_macosVoicesLoaded) filterMacosVoices();
@@ -336,11 +467,139 @@ function onEngineChange() {
 }
 onEngineChange();
 
+// Background audio tracks synced with video
+let _bgAudio = null;     // no_vocals.wav
+let _vocAudio = null;    // vocals.wav (voiceover mode)
+let _bgAudioMode = '';
+let _bgAudioDir = '';    // для какой папки подключены дорожки
+let _bgMissing = false;  // no_vocals.wav ещё не создан (идёт генерация)
+let _jobWorkDir = '';    // папка запущенного сейчас задания
+
+function _stopBgAudio() {
+  if (_bgAudio) { _bgAudio.pause(); _bgAudio = null; }
+  if (_vocAudio) { _vocAudio.pause(); _vocAudio = null; }
+  _bgAudioMode = '';
+  _bgAudioDir = '';
+}
+
+// Папка текущей работы: у восстановленного проекта — resumeWorkDir, у только
+// что запущенного приходит с сервера (source_ready). Нужна, чтобы слушать
+// перевод прямо во время генерации.
+function activeWorkDir() {
+  return resumeWorkDir || _jobWorkDir || '';
+}
+
+function _setupBgAudio() {
+  const mode = document.getElementById('buildOriginalAudio').value;
+  const wdir = activeWorkDir();
+  const needsBg = (mode === 'no_vocals' || mode === 'voiceover') && wdir;
+  if (!needsBg) { _stopBgAudio(); return; }
+  if (mode === _bgAudioMode && _bgAudioDir === wdir) return;
+  _stopBgAudio();
+  _bgMissing = false;
+  const wd = encodeURIComponent(wdir);
+  _bgAudio = new Audio(`/project-audio?work_dir=${wd}&name=no_vocals.wav`);
+  _bgAudio.preload = 'auto';
+  // Разделение дорожек делается уже после TTS, поэтому во время генерации
+  // фона может ещё не быть — тогда играем оригинал приглушённым
+  _bgAudio.addEventListener('error', () => {
+    if (_bgMissing) return;
+    _bgMissing = true;
+    addLog('ℹ️ Фоновая дорожка ещё не готова — предпросмотр с оригинальным звуком');
+  });
+  if (mode === 'voiceover') {
+    _vocAudio = new Audio(`/project-audio?work_dir=${wd}&name=vocals.wav`);
+    _vocAudio.preload = 'auto';
+  }
+  _bgAudioMode = mode;
+  _bgAudioDir = wdir;
+}
+
+function _syncBgAudio() {
+  if (!videoEl) return;
+  const mode = document.getElementById('buildOriginalAudio').value;
+  if (mode !== 'no_vocals' && mode !== 'voiceover') {
+    if (_bgAudio) _bgAudio.pause();
+    if (_vocAudio) _vocAudio.pause();
+    return;
+  }
+  const bgVol = parseInt(document.getElementById('buildNoVocalsVolume').value) / 100;
+  const vocVol = mode === 'voiceover' ? parseInt(document.getElementById('buildVocalsVolume').value) / 100 : 0;
+  [_bgAudio, _vocAudio].forEach((audio, i) => {
+    if (!audio) return;
+    audio.volume = i === 0 ? bgVol : vocVol;
+    if (videoEl.paused) {
+      audio.pause();
+    } else {
+      if (Math.abs(audio.currentTime - videoEl.currentTime) > 0.15) {
+        audio.currentTime = videoEl.currentTime;
+      }
+      audio.playbackRate = videoEl.playbackRate;
+      if (audio.paused) audio.play().catch(() => {});
+    }
+  });
+}
+
+// Звук видео глушится в ноль, только если фон реально играет отдельными
+// дорожками. Пока их нет (идёт генерация) — подмешиваем оригинал, иначе
+// предпрослушивание получилось бы в тишине.
+function _bgTracksPlaying() {
+  return !_bgMissing && !!_bgAudio;
+}
+function getTtsDimVolume() {
+  const mode = document.getElementById('buildOriginalAudio').value;
+  if (mode === 'none') return 0;
+  if (mode === 'no_vocals' || mode === 'voiceover') {
+    if (_bgTracksPlaying()) return 0;
+    return parseInt(document.getElementById('buildVocalsVolume').value) / 100 || 0.15;
+  }
+  if (mode === 'full') return parseInt(document.getElementById('buildOriginalVolume').value) / 100;
+  return 0.08;
+}
+function getGapVolume() {
+  const mode = document.getElementById('buildOriginalAudio').value;
+  if (mode === 'none') return 0;
+  if (mode === 'no_vocals' || mode === 'voiceover') return _bgTracksPlaying() ? 0 : 1;
+  if (mode === 'full') return 1;
+  return 1;
+}
+
+function onLipsyncToggle() {
+  const chk = document.getElementById('lipsyncEnabled');
+  if (!chk) return;
+  const on = chk.checked;
+  document.getElementById('lipsyncEngineField').style.display = on ? 'block' : 'none';
+  const step = document.getElementById('lipsyncStep');
+  const sep = document.getElementById('lipsyncStepSep');
+  if (step) step.style.display = on ? '' : 'none';
+  if (sep) sep.style.display = on ? '' : 'none';
+}
+
+function _updateLipsyncAvailability() {
+  const label = document.getElementById('lipsyncLabel');
+  const chk = document.getElementById('lipsyncEnabled');
+  if (!label || !chk) return;
+  const mode = document.getElementById('buildOriginalAudio').value;
+  const allowed = mode === 'none' || mode === 'no_vocals';
+  chk.disabled = !allowed;
+  label.style.opacity = allowed ? '' : '0.4';
+  label.title = allowed ? '' : 'Доступно только в режимах «Без оригинала» и «Только фон»';
+  if (!allowed && chk.checked) {
+    chk.checked = false;
+    onLipsyncToggle();
+  }
+}
+
 function onOriginalAudioChange() {
   const val = document.getElementById('buildOriginalAudio').value;
   document.getElementById('fullVolumeField').style.display = val === 'full' ? 'block' : 'none';
   document.getElementById('noVocalsVolumeField').style.display = (val === 'no_vocals' || val === 'voiceover') ? 'block' : 'none';
   document.getElementById('vocalsVolumeField').style.display = val === 'voiceover' ? 'block' : 'none';
+  // Update player volume and bg audio
+  if (videoEl) videoEl.volume = getGapVolume();
+  _setupBgAudio();
+  _syncBgAudio();
+  _updateLipsyncAvailability();
 }
 onOriginalAudioChange();
 
@@ -370,11 +629,17 @@ document.getElementById('projectName').addEventListener('blur', function() {
 });
 document.getElementById('anthropicKey').addEventListener('blur', function() {
   const v = this.value.trim();
-  if (v) persistSetting({anthropic_api_key: v});
+  if (v) {
+    persistSetting({anthropic_api_key: v});
+    if (document.getElementById('translateProvider').value === 'claude') onProviderChange();
+  }
 });
 document.getElementById('openaiKey').addEventListener('blur', function() {
   const v = this.value.trim();
-  if (v) persistSetting({openai_api_key: v});
+  if (v) {
+    persistSetting({openai_api_key: v});
+    if (document.getElementById('translateProvider').value === 'openai') onProviderChange();
+  }
 });
 document.getElementById('ollamaUrl').addEventListener('blur', function() {
   const v = this.value.trim();
@@ -439,6 +704,7 @@ document.getElementById('uploadVideo').addEventListener('change', function() {
     label.textContent = data.filename;
     addLog('✅ Видео загружено: ' + data.filename);
     showPlayer('/job-video?path=' + encodeURIComponent(data.path));
+    refreshJobs();
   };
 
   xhr.onerror = () => {
@@ -490,6 +756,7 @@ function downloadUrl() {
       document.getElementById('url').value = data.path;
       addLog('✅ Видео скачано: ' + data.filename);
       showPlayer('/job-video?path=' + encodeURIComponent(data.path));
+      refreshJobs();
     } else if (data.type === 'error') {
       es.close();
       btn.disabled = false;
@@ -538,6 +805,7 @@ document.getElementById('uploadTrans').addEventListener('change', function() {
       if (data.error) return addLog('❌ SRT: ' + data.error, 'error');
       uploadedTranslated = data.subtitles;
       subtitles = data.subtitles;
+      hasTranslation = true;
       _setUploadState('uploadTransBtn', 'uploadTransIcon', true);
       document.getElementById('uploadTransLabel').textContent = this.files[0].name;
       addLog(`🌐 Загружены переведённые субтитры: ${data.subtitles.length} фраз`);
@@ -572,6 +840,14 @@ function deleteJob(e, path, btn) {
 function executeDeleteJob(path, btn, name) {
   closeConfirm();
 
+  // Close project first to release file handles (video player etc.)
+  const wasOpen = resumeWorkDir === path;
+  if (wasOpen) {
+    closeProject();
+  }
+
+  // Small delay to let OS release file handles after closing player
+  setTimeout(() => {
   fetch('/delete-job', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -580,56 +856,20 @@ function executeDeleteJob(path, btn, name) {
   .then(r => r.json())
   .then(data => {
     if (data.error) return addLog('❌ Ошибка: ' + data.error, 'error');
-    const item = btn.closest('.resume-item');
-    item.style.transition = 'opacity .2s, height .2s';
-    item.style.opacity = '0';
-    item.style.height = '0';
-    item.style.padding = '0';
-    item.style.overflow = 'hidden';
-    setTimeout(() => {
-      item.remove();
-      if (!document.querySelectorAll('.resume-item').length) {
-        document.getElementById('resumePanel').style.display = 'none';
-      }
-    }, 200);
     addLog('🗑️ Проект ' + name + ' удалён');
+    refreshJobs();
+  })
+  .catch(err => addLog('❌ Ошибка удаления: ' + err, 'error'));
+  }, wasOpen ? 500 : 0);
+}
 
-    if (resumeWorkDir === path) {
-      resumeWorkDir = null;
-      currentJobId = null;
-      subtitles = [];
-      originalSubs = [];
-      uploadedOriginal = null;
-      uploadedTranslated = null;
-      document.getElementById('url').value = '';
-      document.getElementById('subsList').innerHTML =
-        '<div class="subs-empty"><div class="subs-empty-icon">T</div>Субтитры появятся после транскрипции или загрузки .srt файла</div>';
-      document.getElementById('subsCount').textContent = '';
-      const pw = document.getElementById('playerWrap');
-      document.getElementById('playerArea').innerHTML = '<div class="placeholder"><div class="placeholder-icon">V</div><span>Видео появится после загрузки</span></div>';
-      document.getElementById('playerButtons').innerHTML = '';
-      document.getElementById('videoInfo').classList.remove('visible');
-      pw.classList.add('empty');
-      pw.style.height = '';
-      videoEl = null;
-      stopTtsSync();
-      if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
-      _setUploadState('uploadOrigBtn', 'uploadOrigIcon', false);
-      document.getElementById('uploadOrigLabel').textContent = 'Оригинал .srt';
-      _setUploadState('uploadTransBtn', 'uploadTransIcon', false);
-      document.getElementById('uploadTransLabel').textContent = 'Перевод .srt';
-      ['doTranscribe','doTranslate','doTts','doBuild'].forEach(id => {
-        const chk = document.getElementById(id);
-        chk.checked = true; chk.disabled = false;
-        chk.parentElement.style.opacity = '';
-      });
-      document.getElementById('unlockTranscribe').style.display = 'none';
-      document.getElementById('unlockTranslate').style.display = 'none';
-      document.getElementById('unlockTts').style.display = 'none';
-      ttsWorkDir = '';
-      ttsSegments = new Set();
-    }
-  });
+function downloadJobZip(path) {
+  const a = document.createElement('a');
+  a.href = '/download-job-zip?path=' + encodeURIComponent(path);
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function lockStep(checkId, unlockId) {
@@ -638,6 +878,7 @@ function lockStep(checkId, unlockId) {
   chk.disabled = true;
   chk.parentElement.style.opacity = '.5';
   document.getElementById(unlockId).style.display = '';
+  updateStartBtn();
 }
 
 function unlockStep(checkId, unlockId) {
@@ -646,6 +887,7 @@ function unlockStep(checkId, unlockId) {
   chk.checked = true;
   chk.parentElement.style.opacity = '';
   document.getElementById(unlockId).style.display = 'none';
+  updateStartBtn();
 }
 
 function refreshJobs() {
@@ -653,9 +895,8 @@ function refreshJobs() {
   icon.style.animation = 'spin .6s linear infinite';
   fetch('/past-jobs').then(r => r.json()).then(data => {
     icon.style.animation = '';
-    // reuse loadPastJobs logic
     _updatePastJobs(data);
-  });
+  }).catch(() => { icon.style.animation = ''; });
 }
 
 function loadPastJobs() {
@@ -670,22 +911,23 @@ function _updatePastJobs(data) {
   if (countEl) countEl.textContent = `Проекты (${jobs.length})`;
   if (!jobs.length) {
     list.innerHTML = '';
-    panel.style.display = 'none';
     return;
   }
-  panel.style.display = '';
   list.innerHTML = jobs.map((j, i) => `
-    <div class="resume-item" id="job-r${i}" onclick="resumeJob('${j.path}', this)" data-path="${j.path}">
+    <div class="resume-item" id="job-r${i}" onclick="resumeJob(this.dataset.path, this)" data-path="${j.path.replaceAll('\\', '/')}">
       <span style="display:flex;flex-direction:column;gap:1px">
         <span>${j.title || j.name.replace('job_', '').replaceAll('_', ' ')}</span>
         ${j.title ? '<span style="font-size:9px;color:var(--fg3)">' + j.name + '</span>' : ''}
       </span>
       <span class="badges">
-        ${j.has_video ? '<span class="badge badge-video">video</span>' : ''}
         ${j.has_srt ? '<span class="badge badge-srt">srt</span>' : ''}
-        ${j.has_trans ? '<span class="badge badge-trans">trans</span>' : ''}
+        ${j.has_trans ? '<span class="badge badge-trans">trn</span>' : ''}
+        ${j.has_tts ? '<span class="badge badge-tts">tts</span>' : ''}
       </span>
-      <button class="btn-delete-job" onclick="deleteJob(event, '${j.path}', this)" title="Удалить">
+      <button class="btn-job-action" onclick="event.stopPropagation();downloadJobZip(this.closest('.resume-item').dataset.path)" title="Скачать .zip">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
+      <button class="btn-delete-job" onclick="deleteJob(event, this.closest('.resume-item').dataset.path, this)" title="Удалить">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -693,19 +935,26 @@ function _updatePastJobs(data) {
 }
 
 function closeProject() {
+  _stopBgAudio();
   resumeWorkDir = null;
   currentJobId = null;
   sourceVideoSrc = null;
+  outputVideoPath = null;
+  _playerShowingOutput = false;
   subtitles = [];
   originalSubs = [];
   uploadedOriginal = null;
   uploadedTranslated = null;
+  hasTranslation = false;
   document.getElementById('url').value = '';
   document.getElementById('projectName').value = '';
   document.getElementById('subsList').innerHTML =
     '<div class="subs-empty"><div class="subs-empty-icon">T</div>Субтитры появятся после транскрипции или загрузки .srt файла</div>';
   document.getElementById('subsCount').textContent = '';
   const pw = document.getElementById('playerWrap');
+  // Release video file handle before removing element (Windows keeps file locked otherwise)
+  const vid = document.querySelector('#playerArea video');
+  if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
   document.getElementById('playerArea').innerHTML = '<div class="placeholder"><div class="placeholder-icon">V</div><span>Видео появится после загрузки</span></div>';
   document.getElementById('playerButtons').innerHTML = '';
   document.getElementById('videoInfo').classList.remove('visible');
@@ -729,8 +978,10 @@ function closeProject() {
   document.getElementById('unlockTranslate').style.display = 'none';
   document.getElementById('unlockTts').style.display = 'none';
   ttsWorkDir = '';
+  _jobWorkDir = '';
+  _bgMissing = false;
   ttsSegments = new Set();
-  aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 1; aeSegments = []; aePeaks = [];
+  aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
   document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
   document.getElementById('aeButtons').style.display = 'none';
   document.querySelectorAll('.step').forEach(s => s.className = 'step');
@@ -743,12 +994,55 @@ function closeProject() {
   document.getElementById('log').innerHTML = '';
   logMsgCount = 0;
   document.getElementById('logCount').textContent = '0 записей';
+  _updateSubsDownloadButtons();
   loadPastJobs();
   addLog('📋 Проект закрыт. Готов к новому.');
 }
 
 function resumeJob(path, el) {
-  addLog('📂 Загружаю данные из ' + path.split('/').pop() + '...');
+  // Reset state from previous project before loading new one
+  _stopBgAudio();
+  subtitles = [];
+  originalSubs = [];
+  uploadedOriginal = null;
+  uploadedTranslated = null;
+  hasTranslation = false;
+  speakerMap = {};
+  speakerVoiceMap = {};
+  document.getElementById('speakerMapping').style.display = 'none';
+  ttsWorkDir = '';
+  _jobWorkDir = '';
+  _bgMissing = false;
+  ttsSegments = new Set();
+  aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
+  document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
+  document.getElementById('aeButtons').style.display = 'none';
+  document.getElementById('subsList').innerHTML = '';
+  document.getElementById('subsCount').textContent = '';
+  _setUploadState('uploadOrigBtn', 'uploadOrigIcon', false);
+  document.getElementById('uploadOrigLabel').textContent = 'Оригинал .srt';
+  _setUploadState('uploadTransBtn', 'uploadTransIcon', false);
+  document.getElementById('uploadTransLabel').textContent = 'Перевод .srt';
+  sourceVideoSrc = null;
+  outputVideoPath = null;
+  _playerShowingOutput = false;
+  stopTtsSync();
+  if (syncInterval) { clearInterval(syncInterval); syncInterval = null; }
+  document.getElementById('log').innerHTML = '';
+  logMsgCount = 0;
+  document.getElementById('logCount').textContent = '0 записей';
+  ['doTranscribe','doTranslate','doTts','doBuild'].forEach(id => {
+    const chk = document.getElementById(id);
+    chk.checked = id === 'doTranscribe';
+    chk.disabled = false;
+    chk.parentElement.style.opacity = '';
+  });
+  document.getElementById('unlockTranscribe').style.display = 'none';
+  document.getElementById('unlockTranslate').style.display = 'none';
+  document.getElementById('unlockTts').style.display = 'none';
+
+  _updateSubsDownloadButtons();
+  addLog('📂 Загружаю данные из ' + path.replace(/\\/g, '/').split('/').pop() + '...');
   fetch('/resume-job', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -785,6 +1079,7 @@ function resumeJob(path, el) {
     }
     if (data.translated_subs && data.translated_subs.length) {
       uploadedTranslated = data.translated_subs;
+      hasTranslation = true;
       setStep('translate', 'done');
       lockStep('doTranslate', 'unlockTranslate');
       _setUploadState('uploadTransBtn', 'uploadTransIcon', true);
@@ -842,10 +1137,72 @@ function resumeJob(path, el) {
     document.getElementById('btnCloseProject').style.display = '';
     document.getElementById('resumePanel').classList.remove('open');
     addLog('🚀 Готово к продолжению. Нажмите «Начать».');
+    updateStartBtn();
   });
 }
 
 /* ── Start job ───────────────────────────────────── */
+
+function deleteOrigSubs() {
+  showConfirm(
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
+    'Удалить оригинальные субтитры?',
+    'Субтитры будут удалены из текущего проекта.',
+    () => {
+      closeConfirm();
+      originalSubs = [];
+      uploadedOriginal = null;
+      if (!uploadedTranslated) subtitles = [];
+      _setUploadState('uploadOrigBtn', 'uploadOrigIcon', false);
+      document.getElementById('uploadOrigLabel').textContent = 'Оригинал .srt';
+      const chk = document.getElementById('doTranscribe');
+      chk.disabled = false; chk.checked = true; chk.parentElement.style.opacity = '';
+      document.getElementById('unlockTranscribe').style.display = 'none';
+      renderSubtitles();
+      if (resumeWorkDir) {
+        fetch('/save-subs', { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({work_dir: resumeWorkDir, type: 'original', delete: true}) });
+      }
+      addLog('🗑️ Оригинальные субтитры удалены');
+      updateStartBtn();
+    }
+  );
+}
+
+function deleteTransSubs() {
+  showConfirm(
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
+    'Удалить переведённые субтитры?',
+    'Субтитры будут удалены из текущего проекта.',
+    () => {
+      closeConfirm();
+      subtitles = originalSubs.length ? [...originalSubs] : [];
+      uploadedTranslated = null;
+      hasTranslation = false;
+      _setUploadState('uploadTransBtn', 'uploadTransIcon', false);
+      document.getElementById('uploadTransLabel').textContent = 'Перевод .srt';
+      const chk = document.getElementById('doTranslate');
+      chk.disabled = false; chk.checked = true; chk.parentElement.style.opacity = '';
+      document.getElementById('unlockTranslate').style.display = 'none';
+      renderSubtitles();
+      if (resumeWorkDir) {
+        fetch('/save-subs', { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({work_dir: resumeWorkDir, type: 'translated', delete: true}) });
+      }
+      addLog('🗑️ Переведённые субтитры удалены');
+      updateStartBtn();
+    }
+  );
+}
+
+function updateStartBtn() {
+  const any = ['doTranscribe','doTranslate','doTts','doBuild'].some(id => {
+    const chk = document.getElementById(id);
+    return chk && chk.checked && !chk.disabled;
+  });
+  document.getElementById('btnStart').disabled = !any;
+}
+updateStartBtn();
 
 function startJob() {
   const url = document.getElementById('url').value.trim();
@@ -896,6 +1253,7 @@ function startJob() {
     skip_tts: skipTts,
     skip_build: skipBuild,
     separate_vocals: document.getElementById('separateVocals').checked,
+    merge_sentences: document.getElementById('mergeSentences')?.checked ?? true,
     translate_provider: document.getElementById('translateProvider').value,
     translate_model: getTranslateModel(),
     build_format: document.getElementById('buildFormat').value,
@@ -910,14 +1268,17 @@ function startJob() {
     build_burn_subs: document.getElementById('buildBurnSubs').checked,
     build_start_sec: parseFloat(document.getElementById('buildStartSec').value) || 0,
     build_end_sec: parseFloat(document.getElementById('buildEndSec').value) || 0,
+    lipsync_enabled: document.getElementById('lipsyncEnabled')?.checked || false,
+    lipsync_engine: document.getElementById('lipsyncEngine')?.value || '',
     tts_engine: document.getElementById('ttsEngine').value,
     tts_voice: getTtsVoice(),
     tts_seed: getTtsSeed(),
     tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7,
+    tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
     num_speakers: parseInt(document.getElementById('numSpeakers').value) || 0,
     speaker_voice_map: Object.keys(speakerVoiceMap).length ? speakerVoiceMap : undefined,
   };
-  if (subtitles.length) body.translated_subs = subtitles;
+  if (hasTranslation && subtitles.length) body.translated_subs = subtitles;
   else if (uploadedTranslated) body.translated_subs = uploadedTranslated;
   if (originalSubs.length) body.original_subs = originalSubs;
   else if (uploadedOriginal) body.original_subs = uploadedOriginal;
@@ -938,6 +1299,7 @@ function startJob() {
     currentJobId = data.job_id;
     document.getElementById('btnCloseProject').style.display = '';
     addLog('⚡ Запущен процесс: ' + data.job_id);
+    loadPastJobs();
     listenProgress(data.job_id);
   })
   .catch(e => {
@@ -961,10 +1323,15 @@ function listenProgress(jobId) {
   });
 
   es.addEventListener('source_ready', e => {
+    const d = JSON.parse(e.data);
+    if (d.work_dir) {
+      _jobWorkDir = d.work_dir;
+      _setupBgAudio();  // фоновые дорожки доступны и для нового задания
+    }
     if (!videoEl) {
-      const d = JSON.parse(e.data);
       showPlayer('/source/' + jobId, null, d.path);
     }
+    loadPastJobs();
   });
 
   es.addEventListener('original_ready', () => {
@@ -975,10 +1342,21 @@ function listenProgress(jobId) {
       });
       if (allSpeakers.size > 1) showSpeakerMappingPanel([...allSpeakers].sort());
     });
+    _setUploadState('uploadOrigBtn', 'uploadOrigIcon', true);
+    document.getElementById('uploadOrigLabel').textContent = 'Оригинал .srt';
+    lockStep('doTranscribe', 'unlockTranscribe');
   });
 
-  es.addEventListener('subtitles_ready', () => {
+  es.addEventListener('subtitles_ready', e => {
+    let d = {};
+    try { d = JSON.parse(e.data) || {}; } catch (_) {}
     loadSubtitles(jobId, 'translated');
+    // Перевод пропущен и субтитры — копия оригинала: замок не нужен
+    if (d.translated === false) { hasTranslation = false; return; }
+    hasTranslation = true;
+    _setUploadState('uploadTransBtn', 'uploadTransIcon', true);
+    document.getElementById('uploadTransLabel').textContent = 'Перевод .srt';
+    lockStep('doTranslate', 'unlockTranslate');
   });
 
   let _subAddTimer = null;
@@ -991,6 +1369,9 @@ function listenProgress(jobId) {
         subtitles = originalSubs;
       }
     } else if (d.mode === 'translated') {
+      hasTranslation = true;
+      // Ensure subtitles is a separate array from originalSubs
+      if (subtitles === originalSubs) subtitles = [...originalSubs];
       const subs = d.subs || [];
       subs.forEach(s => {
         const idx = subtitles.findIndex(x => x.index === s.index);
@@ -998,36 +1379,48 @@ function listenProgress(jobId) {
         else subtitles.push(s);
       });
     }
-    document.getElementById('subsCount').textContent = `${subtitles.length} фраз`;
+    const _chars = subtitles.reduce((s, sub) => s + (sub.text || '').length, 0);
+    document.getElementById('subsCount').textContent = `${subtitles.length} фраз / ${_chars} симв.`;
     // Throttle rendering to avoid UI lag
     if (!_subAddTimer) {
       _subAddTimer = setTimeout(() => { _subAddTimer = null; renderSubtitles(); }, 300);
     }
   });
 
+  let _ttsSegTimer = null;
   es.addEventListener('tts_segment', e => {
     const d = JSON.parse(e.data);
     ttsSegments.add(d.index);
-    renderSubtitles();
-    loadAeSegments();
+    // Готовые сегменты можно слушать сразу, не дожидаясь конца генерации
+    if (!ttsWorkDir) {
+      ttsWorkDir = d.work_dir || activeWorkDir();
+      if (ttsWorkDir) addLog('🎧 Первый сегмент готов — можно включить видео и слушать перевод');
+    }
+    // Перерисовку троттлим: на длинном списке она сбивала бы прокрутку
+    if (!_ttsSegTimer) {
+      _ttsSegTimer = setTimeout(() => {
+        _ttsSegTimer = null;
+        renderSubtitles();
+        loadAeSegments();
+      }, 400);
+    }
   });
 
   es.addEventListener('tts_ready', e => {
     const d = JSON.parse(e.data);
     ttsWorkDir = d.work_dir;
     loadTtsSegments(ttsWorkDir, true);
+    lockStep('doTts', 'unlockTts');
+    loadPastJobs();
   });
 
   es.addEventListener('done', e => {
     const d = JSON.parse(e.data);
     addLog('🎉 Готово! ' + d.path);
     document.getElementById('btnStart').disabled = false;
-      // Keep source video in player, add output download button
-      if (sourceVideoSrc) {
-        showPlayer(sourceVideoSrc, d.path);
-      } else {
-        showPlayer('/video/' + jobId, d.path);
-      }
+    // Update output path and rebuild player buttons without resetting video
+    outputVideoPath = d.path || null;
+    _rebuildPlayerButtons();
     es.close();
   });
 
@@ -1087,6 +1480,9 @@ function loadVideoInfo(src) {
 }
 
 function showPlayer(src, outputPath, videoPath) {
+  sourceVideoSrc = src;
+  outputVideoPath = outputPath || null;
+  _playerShowingOutput = false;
   document.getElementById('btnCloseProject').style.display = '';
   document.getElementById('sourceSection').style.display = 'none';
   document.getElementById('subsAndParams').style.display = '';
@@ -1113,6 +1509,9 @@ function showPlayer(src, outputPath, videoPath) {
       }
       ttsSyncPlaying.clear();
       ttsSyncDone.clear();
+      // Sync bg audio position on seek
+      if (_bgAudio) _bgAudio.currentTime = videoEl.currentTime;
+      if (_vocAudio) _vocAudio.currentTime = videoEl.currentTime;
       // Delay TTS creation to avoid double-play race condition
       setTimeout(() => { _ttsSeeking = false; }, 150);
     });
@@ -1124,6 +1523,8 @@ function showPlayer(src, outputPath, videoPath) {
     pa.appendChild(ps);
     startSubSync();
   }
+  // Setup background audio for no_vocals/voiceover modes
+  _setupBgAudio();
   // Load video info
   loadVideoInfo(videoPath || src);
   // Header buttons
@@ -1133,6 +1534,7 @@ function showPlayer(src, outputPath, videoPath) {
   // Subtitles mode buttons
   const subsGroup = document.createElement('div');
   subsGroup.id = 'playerSubsMode';
+  subsGroup.className = 'subs-mode-group';
   subsGroup.dataset.mode = 'off';
   subsGroup.style.cssText = 'display:inline-flex;gap:1px;background:var(--bg3);border-radius:4px;border:1px solid var(--border);overflow:hidden';
   const subsModes = [
@@ -1157,23 +1559,71 @@ function showPlayer(src, outputPath, videoPath) {
   });
   pb.appendChild(subsGroup);
 
-  // Track source video path
-  sourceVideoSrc = src;
+  _rebuildPlayerButtons();
+}
 
-  // Download source button (SVG)
+function _rebuildPlayerButtons() {
+  const pb = document.getElementById('playerButtons');
+  if (!pb) return;
+  // Keep subtitle buttons (first child group), remove the rest
+  const subsGroup = pb.querySelector('.subs-mode-group');
+  pb.innerHTML = '';
+  if (subsGroup) pb.appendChild(subsGroup);
+
+  const src = sourceVideoSrc;
+  const outputPath = outputVideoPath;
   const dlSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-  const dlSrc = document.createElement('a');
-  dlSrc.href = src;
-  dlSrc.download = '';
-  dlSrc.title = 'Скачать исходное видео';
-  dlSrc.style.cssText = 'text-decoration:none;cursor:pointer;opacity:.7;padding:2px 4px;color:var(--fg2);display:inline-flex;align-items:center';
-  dlSrc.innerHTML = dlSvg;
-  dlSrc.onmouseover = () => dlSrc.style.opacity = '1';
-  dlSrc.onmouseout = () => dlSrc.style.opacity = '.7';
-  pb.appendChild(dlSrc);
 
-  // Download output button (SVG, green)
+  // Download source button
+  if (src) {
+    const dlSrc = document.createElement('a');
+    dlSrc.href = src;
+    dlSrc.download = '';
+    dlSrc.title = 'Скачать исходное видео';
+    dlSrc.style.cssText = 'text-decoration:none;cursor:pointer;opacity:.7;padding:2px 4px;color:var(--fg2);display:inline-flex;align-items:center';
+    dlSrc.innerHTML = dlSvg;
+    dlSrc.onmouseover = () => dlSrc.style.opacity = '1';
+    dlSrc.onmouseout = () => dlSrc.style.opacity = '.7';
+    pb.appendChild(dlSrc);
+  }
+
+  // Toggle original/translated video button
   if (outputPath) {
+    const toggleBtn = document.createElement('button');
+    toggleBtn.id = 'btnToggleVideo';
+    toggleBtn.title = 'Переключить оригинал / перевод';
+    toggleBtn.style.cssText = 'background:none;border:1px solid var(--border);border-radius:4px;cursor:pointer;padding:2px 8px;color:var(--fg2);display:inline-flex;align-items:center;gap:4px;font-size:11px;font-family:inherit';
+    const switchSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>';
+    toggleBtn.innerHTML = switchSvg + ' <span id="toggleVideoLabel">Переведённое</span>';
+    if (_playerShowingOutput) {
+      document.getElementById('toggleVideoLabel')?.remove();
+      toggleBtn.style.color = '#10b981';
+      toggleBtn.innerHTML = switchSvg + ' <span id="toggleVideoLabel">Оригинальное</span>';
+    }
+    toggleBtn.onclick = () => {
+      const curTime = videoEl.currentTime;
+      const wasPlaying = !videoEl.paused;
+      if (_playerShowingOutput) {
+        videoEl.src = sourceVideoSrc;
+        _playerShowingOutput = false;
+        document.getElementById('toggleVideoLabel').textContent = 'Переведённое';
+        toggleBtn.style.color = 'var(--fg2)';
+      } else {
+        videoEl.src = '/job-video?path=' + encodeURIComponent(outputVideoPath);
+        _playerShowingOutput = true;
+        document.getElementById('toggleVideoLabel').textContent = 'Оригинальное';
+        toggleBtn.style.color = '#10b981';
+      }
+      videoEl.load();
+      videoEl.addEventListener('loadeddata', function onLoaded() {
+        videoEl.removeEventListener('loadeddata', onLoaded);
+        videoEl.currentTime = curTime;
+        if (wasPlaying) videoEl.play().catch(() => {});
+      });
+    };
+    pb.appendChild(toggleBtn);
+
+    // Download output button (green)
     const dlOut = document.createElement('a');
     dlOut.href = '/job-video?path=' + encodeURIComponent(outputPath);
     dlOut.download = '';
@@ -1183,10 +1633,8 @@ function showPlayer(src, outputPath, videoPath) {
     dlOut.onmouseover = () => dlOut.style.opacity = '1';
     dlOut.onmouseout = () => dlOut.style.opacity = '.7';
     pb.appendChild(dlOut);
-  }
 
-  // Delete output button
-  if (outputPath) {
+    // Delete output button
     const delBtn = document.createElement('button');
     delBtn.title = 'Удалить переведённое видео';
     delBtn.style.cssText = 'background:none;border:none;cursor:pointer;opacity:.7;padding:2px 4px;color:var(--red);display:inline-flex;align-items:center';
@@ -1198,14 +1646,15 @@ function showPlayer(src, outputPath, videoPath) {
         fetch('/delete-output', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({path: outputPath})
+          body: JSON.stringify({path: outputVideoPath})
         })
         .then(r => r.json())
         .then(d => {
           if (d.error) return addLog('❌ ' + d.error, 'error');
           addLog('🗑️ Переведённое видео удалено');
-          pb.innerHTML = '';
-          if (resumeWorkDir) resumeJob(resumeWorkDir);
+          outputVideoPath = null;
+          _playerShowingOutput = false;
+          _rebuildPlayerButtons();
         });
       });
     };
@@ -1221,7 +1670,9 @@ function stopTtsSync() {
   }
   ttsSyncPlaying.clear();
   ttsSyncDone.clear();
-  if (videoEl) { videoEl.volume = 1; videoEl.playbackRate = 1; }
+  if (videoEl) { videoEl.volume = getGapVolume(); videoEl.playbackRate = 1; }
+  if (_bgAudio) _bgAudio.pause();
+  if (_vocAudio) _vocAudio.pause();
 }
 
 function startSubSync() {
@@ -1357,24 +1808,25 @@ function startSubSync() {
       sub && ttsSegments.has(sub.index) && t >= sub.start - 0.8 && t <= sub.end + 0.8
     );
     if (activeTtsIdxs.size > 0) {
-      videoEl.volume = TTS_DIM_VOLUME;
+      videoEl.volume = getTtsDimVolume();
     } else if (!anyTtsNear && ttsSyncPlaying.size === 0) {
-      videoEl.volume = 1;
+      videoEl.volume = getGapVolume();
       videoEl.playbackRate = 1;
     }
+    // Sync background audio (no_vocals)
+    _syncBgAudio();
   }, 100);
 }
 
 /* ── Subtitles ───────────────────────────────────── */
 
-let originalSubs = [];
 let ttsWorkDir = '';
 let ttsSegments = new Set();
 let ttsAudioEl = null;
 let ttsSyncPlaying = new Map(); // index -> Audio
 let ttsSyncDone = new Set();   // segments that finished in this playback
 let _ttsSeeking = false;       // suppress TTS creation during seek
-const TTS_DIM_VOLUME = 0.08;
+
 
 function loadTtsSegments(workDir, thenRender) {
   fetch('/tts-segments?work_dir=' + encodeURIComponent(workDir))
@@ -1412,12 +1864,19 @@ function loadSubtitles(jobId, mode) {
 }
 
 function renderSubtitles() {
+  _updateSubsDownloadButtons();
   const list = document.getElementById('subsList');
   const savedScroll = list.scrollTop;
   list.innerHTML = '';
   const rows = Math.max(subtitles.length, originalSubs.length);
   const showBoth = originalSubs.length > 0;
-  document.getElementById('subsCount').textContent = rows + ' фраз';
+  const _totalChars = subtitles.reduce((s, sub) => s + (sub.text || '').length, 0);
+  document.getElementById('subsCount').textContent = rows ? `${rows} фраз / ${_totalChars} симв.` : '';
+
+  if (rows === 0) {
+    list.innerHTML = '<div class="subs-empty"><div class="subs-empty-icon">T</div>Субтитры появятся после транскрипции или загрузки .srt файла</div>';
+    return;
+  }
 
   for (let i = 0; i < rows; i++) {
     const sub = subtitles[i] || originalSubs[i];
@@ -1649,6 +2108,7 @@ function renderSubtitles() {
             tts_voice: ttsVoice,
             tts_seed: getTtsSeed(),
             tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7,
+    tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
           })
         })
         .then(r => r.json())
@@ -2022,7 +2482,7 @@ function testTtsVoice() {
   fetch('/tts-test', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(), tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7 })
+    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(), tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7, tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0 })
   })
   .then(r => r.json())
   .then(d => {
@@ -2304,7 +2764,8 @@ function autoSaveSubs() {
   _subsSaveTimer = setTimeout(() => {
     const body = {};
     if (originalSubs.length) body.original = originalSubs;
-    if (subtitles.length) body.translated = subtitles;
+    // без перевода subtitles — это оригиналы; писать их в translated.srt нельзя
+    if (hasTranslation && subtitles.length) body.translated = subtitles;
     if (!Object.keys(body).length) return;
 
     // Save via job if active, otherwise via work_dir
@@ -2684,8 +3145,24 @@ function showSpeakerMappingPanel(speakers) {
           voiceSel.innerHTML = '';
           (d.voices||[]).forEach(v => voiceSel.add(new Option(v.name, v.name)));
         });
+      } else if (eng === 'elevenlabs') {
+        voiceSel.add(new Option('Загрузка...', ''));
+        fetch('/elevenlabs-voices').then(r=>r.json()).then(d => {
+          voiceSel.innerHTML = '<option value="">По умолчанию (Rachel)</option>';
+          (d.voices||[]).forEach(v => voiceSel.add(new Option(v.name + (v.lang ? ' — ' + v.lang : ''), v.id)));
+          const s = speakerVoiceMap[spk];
+          if (s) setTimeout(() => { voiceSel.value = s.voice || ''; }, 100);
+        });
+      } else if (eng === 'fish-audio') {
+        voiceSel.add(new Option('Загрузка...', ''));
+        fetch('/fish-voices').then(r=>r.json()).then(d => {
+          voiceSel.innerHTML = '<option value="">По умолчанию</option>';
+          (d.voices||[]).forEach(v => voiceSel.add(new Option(v.name + (v.lang ? ' — ' + v.lang : ''), v.id)));
+          const s = speakerVoiceMap[spk];
+          if (s) setTimeout(() => { voiceSel.value = s.voice || ''; }, 100);
+        });
       } else {
-        // Qwen base — cloned voices
+        // Qwen base / OmniVoice — cloned voices
         const mainVoice = document.getElementById('ttsVoice');
         voiceSel.innerHTML = mainVoice.innerHTML;
       }

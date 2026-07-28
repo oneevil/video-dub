@@ -9,7 +9,115 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+_VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+
+
+def _detect_cuda_tag():
+    """Detect installed CUDA and return best matching PyTorch wheel tag."""
+    try:
+        r = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, encoding="utf-8")
+        if r.returncode == 0:
+            import re as _re
+            m = _re.search(r"release (\d+)\.(\d+)", r.stdout)
+            if m:
+                ver = int(m.group(1)) * 10 + int(m.group(2))
+                available = [130, 129, 128, 126, 124, 121, 118]
+                for tag in available:
+                    if tag <= ver:
+                        return f"cu{tag}"
+    except FileNotFoundError:
+        pass
+    return "cu128"
+
+
+def _torch_index_args():
+    """Return pip args for installing CUDA-enabled PyTorch (Windows/Linux)."""
+    if sys.platform == "darwin":
+        return []
+    tag = _detect_cuda_tag()
+    return ["--extra-index-url", f"https://download.pytorch.org/whl/{tag}"]
+
+
+# ── Изолированные окружения ───────────────────────────────────────────────────
+# Наличие bin/python ещё не значит, что зависимости встали: если pip упал на
+# середине, окружение остаётся битым навсегда. Готовность помечаем файлом.
+_VENV_MARKER = ".deps_ok"
+
+
+def venv_python(venv_path: str) -> str:
+    return os.path.join(venv_path, _VENV_BIN, "python")
+
+
+def venv_ready(venv_path: str) -> bool:
+    return (os.path.exists(os.path.join(venv_path, _VENV_MARKER))
+            and os.path.exists(venv_python(venv_path)))
+
+
+def mark_venv_ready(venv_path: str):
+    with open(os.path.join(venv_path, _VENV_MARKER), "w", encoding="utf-8") as f:
+        f.write("ok\n")
+
+
+def _safe_remove(path: str):
+    """Удаление, не падающее на Windows, если файл ещё держит другой процесс."""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def rmtree_safe(path: str):
+    """rmtree, устойчивый к read-only файлам Windows."""
+    def _on_error(func, p, _exc):
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except OSError:
+            pass
+    shutil.rmtree(path, onerror=_on_error)
+
+
+def safe_cwd() -> str:
+    """Рабочий каталог для дочерних процессов.
+
+    Запускать их из папки проекта нельзя: её модули (plugins/, pipeline.py)
+    затеняют одноимённые библиотеки. Прежний «/» на Windows означает корень
+    текущего диска — не всегда доступен для записи, поэтому берём temp.
+    """
+    import tempfile
+    return tempfile.gettempdir()
+
+
+def drain_stderr(proc, maxlines: int = 200):
+    """Фоново вычитывает stderr процесса, возвращает deque с хвостом вывода.
+
+    Обязательно для любого Popen(stderr=PIPE), чей stderr не читают сразу:
+    труба всего 16 КБ (macOS), и как только tqdm/варнинги её заполнят, дочерний
+    процесс навсегда блокируется на записи — снаружи это выглядит как зависание.
+    """
+    from collections import deque
+    import threading as _th
+    tail = deque(maxlen=maxlines)
+    if getattr(proc, "stderr", None) is None:
+        return tail
+
+    def _read():
+        try:
+            for line in proc.stderr:
+                tail.append(line.rstrip())
+        except Exception:
+            pass
+
+    _th.Thread(target=_read, daemon=True).start()
+    return tail
+
+
+# Ensure all Python processes use UTF-8 on Windows (default is charmap/cp1252)
+os.environ.setdefault("PYTHONUTF8", "1")
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 WHISPER_MODELS_DIR = os.path.join(MODELS_DIR, "whisper")
@@ -72,7 +180,8 @@ def parse_srt(srt_text: str) -> list[dict]:
     subtitles = []
     for block in blocks:
         lines = block.strip().splitlines()
-        if len(lines) < 3:
+        # 2 строки = субтитр с пустым текстом (его тоже нужно сохранить)
+        if len(lines) < 2:
             continue
         try:
             idx = int(lines[0].strip())
@@ -95,10 +204,11 @@ def parse_srt(srt_text: str) -> list[dict]:
 
 
 def secs_to_srt_time(s: float) -> str:
-    h = int(s // 3600)
-    m = int((s % 3600) // 60)
-    sec = int(s % 60)
-    ms = int(round((s - int(s)) * 1000))
+    # округление ведём по всей величине, иначе 1.9999 даёт ms=1000
+    total_ms = max(0, int(round(float(s) * 1000)))
+    h, rem = divmod(total_ms, 3600 * 1000)
+    m, rem = divmod(rem, 60 * 1000)
+    sec, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
 
@@ -108,6 +218,155 @@ def write_srt(subtitles: list[dict], path: str):
             f.write(f"{sub['index']}\n")
             f.write(f"{secs_to_srt_time(sub['start'])} --> {secs_to_srt_time(sub['end'])}\n")
             f.write(f"{sub['text']}\n\n")
+
+
+_SENTENCE_END = ('.', '!', '?', '…', '"', '»', ')', ':', ';')
+
+
+def _ends_sentence(text: str) -> bool:
+    t = (text or "").rstrip()
+    if not t:
+        return True
+    # «т.д.», «т.е.», инициалы — точка не заканчивает фразу
+    if len(t) >= 2 and t[-1] == '.' and t[-2].isalpha() and t[-2].islower() and len(t.split()[-1]) <= 2:
+        return False
+    return t.endswith(_SENTENCE_END)
+
+
+def merge_into_sentences(subtitles: list[dict], others: list[dict] | None = None,
+                         max_gap: float = 1.0, max_dur: float = 25.0,
+                         max_chars: int = 500, min_dur: float = 1.6,
+                         min_chars: int = 28) -> tuple[list[dict], list[dict]]:
+    """Склеивает соседние субтитры в законченные фразы.
+
+    Транскрипция режет речь по паузам дыхания, а не по предложениям: 88%
+    сегментов обрываются на полуслове. Синтез каждого куска отдельно даёт
+    оборванную интонацию и рывки на стыках. Склеиваем, пока фраза не закончена.
+
+    Группа разрывается на: знаке конца предложения, паузе больше max_gap,
+    смене говорящего. `others` (оригинальные субтитры) склеиваются по тем же
+    границам, чтобы пары строк в редакторе не разъехались.
+
+    Возвращает (склеенные, склеенные_others) с новой сквозной нумерацией.
+    """
+    if not subtitles:
+        return [], (others or [])
+
+    # Предложения заканчиваются внутри сегментов, а не на их границах, поэтому
+    # сперва режем сегменты по знакам препинания. Время куска считаем
+    # пропорционально длине текста — слова внутри сегмента звучат равномерно.
+    def _to_pieces(subs: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for sub in subs:
+            text = (sub.get("text") or "").strip()
+            start, end = sub.get("start", 0), sub.get("end", 0)
+            parts = [p for p in re.split(r'(?<=[.!?…])\s+', text) if p.strip()]
+            if len(parts) < 2 or end <= start or not text:
+                out.append({**sub, "text": text, "start": start, "end": end})
+                continue
+            total = sum(len(p) for p in parts)
+            pos = start
+            for p in parts:
+                share = (end - start) * (len(p) / total)
+                out.append({**sub, "text": p.strip(), "start": pos,
+                            "end": min(pos + share, end)})
+                pos += share
+        return out
+
+    subtitles = _to_pieces(subtitles)  # дальше работаем с кусками предложений
+
+    chains: list[list[int]] = []
+    cur: list[int] = [0]
+    for i in range(1, len(subtitles)):
+        prev, sub = subtitles[i - 1], subtitles[i]
+        gap = sub.get("start", 0) - prev.get("end", 0)
+        same_speaker = prev.get("speaker", "") == sub.get("speaker", "")
+        if _ends_sentence(prev.get("text", "")) or gap > max_gap or not same_speaker:
+            chains.append(cur)
+            cur = [i]
+        else:
+            cur.append(i)
+    chains.append(cur)
+
+    def _too_long(chain: list[int]) -> bool:
+        dur = subtitles[chain[-1]].get("end", 0) - subtitles[chain[0]].get("start", 0)
+        chars = sum(len(subtitles[j].get("text") or "") for j in chain)
+        return dur > max_dur or chars > max_chars
+
+    def _split(chain: list[int]) -> list[list[int]]:
+        """Предложение нередко кончается в середине сегмента, поэтому цепочка
+        «незавершённых» может тянуться минутами. Режем её по мягкой границе —
+        запятая/тире или самая длинная пауза, — а не в случайном месте."""
+        if len(chain) < 2 or not _too_long(chain):
+            return [chain]
+        best_k, best_score = 0, None
+        for k in range(len(chain) - 1):
+            j, nxt = chain[k], chain[k + 1]
+            text = (subtitles[j].get("text") or "").rstrip()
+            soft = 2.0 if text.endswith((',', '—', '–', '-', ':', ';')) else 0.0
+            gap = min(subtitles[nxt].get("start", 0) - subtitles[j].get("end", 0), 1.0)
+            centered = 1.0 - abs(k - (len(chain) - 1) / 2) / max(len(chain) - 1, 1)
+            score = soft + gap + centered
+            if best_score is None or score > best_score:
+                best_k, best_score = k, score
+        return _split(chain[:best_k + 1]) + _split(chain[best_k + 1:])
+
+    groups: list[list[int]] = []
+    for chain in chains:
+        groups.extend(_split(chain))
+
+    # Слишком короткие фразы («Поворот.») подтягиваем к соседям: на 0.5-секундном
+    # тексте клонированный голос у TTS-моделей уплывает — сегмент звучит чужим.
+    merged_short: list[list[int]] = []
+    for g in groups:
+        dur = subtitles[g[-1]].get("end", 0) - subtitles[g[0]].get("start", 0)
+        chars = sum(len(subtitles[j].get("text") or "") for j in g)
+        if merged_short and (dur < min_dur or chars < min_chars):
+            prev_g = merged_short[-1]
+            gap = subtitles[g[0]].get("start", 0) - subtitles[prev_g[-1]].get("end", 0)
+            same_speaker = (subtitles[prev_g[0]].get("speaker", "")
+                            == subtitles[g[0]].get("speaker", ""))
+            prev_dur = subtitles[prev_g[-1]].get("end", 0) - subtitles[prev_g[0]].get("start", 0)
+            prev_chars = sum(len(subtitles[j].get("text") or "") for j in prev_g)
+            fits = (prev_dur + dur <= max_dur) and (prev_chars + chars <= max_chars)
+            if gap <= max_gap and same_speaker and fits:
+                merged_short[-1] = prev_g + g
+                continue
+        merged_short.append(g)
+    groups = merged_short
+
+    def _join(idxs: list[int], new_index: int) -> dict:
+        parts = [(subtitles[i].get("text") or "").strip() for i in idxs]
+        first, last = subtitles[idxs[0]], subtitles[idxs[-1]]
+        merged = {**first,
+                  "index": new_index,
+                  "start": first.get("start", 0),
+                  "end": last.get("end", 0),
+                  "text": " ".join(p for p in parts if p)}
+        merged.pop("_src", None)
+        return merged
+
+    merged_subs = [_join(g, n) for n, g in enumerate(groups, 1)]
+
+    # Оригиналы режем не по тексту (границы предложений в другом языке иные),
+    # а по времени итоговых фраз — чтобы пары строк в редакторе не разъехались.
+    merged_others = []
+    if others:
+        other_pieces = _to_pieces(others)
+        for n, m in enumerate(merged_subs, 1):
+            texts = [(o.get("text") or "").strip() for o in other_pieces
+                     if m["start"] - 0.01 <= (o.get("start", 0) + o.get("end", 0)) / 2 < m["end"] + 0.01]
+            merged_others.append({"index": n, "start": m["start"], "end": m["end"],
+                                  "text": " ".join(t for t in texts if t)})
+    return merged_subs, merged_others
+
+
+def segments_signature(subtitles: list[dict]) -> str:
+    """Отпечаток разбивки: по нему видно, что готовые TTS-сегменты устарели."""
+    import hashlib
+    raw = ";".join(f"{s.get('index')}:{s.get('start', 0):.2f}-{s.get('end', 0):.2f}"
+                   for s in subtitles or [])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def write_speaker_map(subtitles, path):
@@ -139,19 +398,11 @@ class ProcessingError(Exception):
 
 
 def check_dependencies(log):
-    """Проверяет наличие всех зависимостей."""
+    """Проверяет наличие системных зависимостей."""
     missing = []
     for tool in ["yt-dlp", "ffmpeg"]:
         if not shutil.which(tool):
             missing.append(tool)
-    try:
-        import whisper
-    except ImportError:
-        missing.append("openai-whisper (pip install openai-whisper)")
-    try:
-        import anthropic
-    except ImportError:
-        missing.append("anthropic (pip install anthropic)")
     if missing:
         raise ProcessingError(
             "Не найдены зависимости:\n" + "\n".join(f"  • {m}" for m in missing)
@@ -171,7 +422,7 @@ def download_video(url: str, out_dir: str, log) -> str:
         "-o", out_template,
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"yt-dlp ошибка:\n{result.stderr}")
     # Найти скачанный файл
@@ -194,7 +445,7 @@ def extract_audio(video_path: str, out_dir: str, log) -> str:
         "-map", "0:a:0",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"ffmpeg (audio) ошибка:\n{result.stderr}")
     log("✅ Аудио извлечено")
@@ -202,23 +453,24 @@ def extract_audio(video_path: str, out_dir: str, log) -> str:
 
 
 DEMUCS_VENV = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv-demucs")
-_DEMUCS_DEPS = ["demucs>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0"]
+# numpy: demucs объявляет его только для darwin x86_64, но импортирует всегда
+_DEMUCS_DEPS = ["demucs>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "numpy"]
 
 
 def _setup_demucs_venv(log):
     """Create isolated venv for demucs if needed."""
-    python = os.path.join(DEMUCS_VENV, "bin", "python")
-    if os.path.exists(python):
+    if venv_ready(DEMUCS_VENV):
         return
     import sys as _sys
     log("   📦 Создаю окружение demucs...")
     subprocess.run([_sys.executable, "-m", "venv", DEMUCS_VENV], check=True)
     log("   📦 Устанавливаю зависимости...")
     result = subprocess.run(
-        [os.path.join(DEMUCS_VENV, "bin", "pip"), "install", "--quiet"] + _DEMUCS_DEPS,
-        capture_output=True, text=True)
+        [os.path.join(DEMUCS_VENV, _VENV_BIN, "pip"), "install", "--quiet"] + _torch_index_args() + _DEMUCS_DEPS,
+        capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"Ошибка установки demucs: {result.stderr[:500]}")
+    mark_venv_ready(DEMUCS_VENV)
     log("   ✅ Окружение demucs готово")
 
 
@@ -236,15 +488,24 @@ def separate_vocals(audio_path: str, out_dir: str, log) -> tuple[str, str]:
 
     log("🎙️ Разделяю голос и фон (demucs)...")
     demucs_out = os.path.join(out_dir, "demucs_out")
-    python = os.path.join(DEMUCS_VENV, "bin", "python")
+    python = os.path.join(DEMUCS_VENV, _VENV_BIN, "python")
+
+    # Detect GPU for demucs
+    device_check = subprocess.run(
+        [python, "-c", "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'))"],
+        capture_output=True, text=True, encoding="utf-8")
+    device = device_check.stdout.strip() if device_check.returncode == 0 else "cpu"
+    log(f"   Устройство: {device}")
+
     cmd = [
         python, "-m", "demucs",
         "--two-stems=vocals",
+        "-d", device,
         "-o", demucs_out,
         "--filename", "{stem}.{ext}",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"demucs ошибка:\n{result.stderr}")
 
@@ -298,6 +559,8 @@ def translate_subtitles(subtitles: list[dict], target_lang: str,
 
 
 from plugins.tts import discover_plugins
+from plugins.lipsync import discover_plugins as _discover_lipsync
+LIPSYNC_ENGINES, _LIPSYNC_PLUGINS = _discover_lipsync()
 
 # Dynamic TTS engine discovery
 TTS_ENGINES, _TTS_PLUGINS = discover_plugins()
@@ -357,22 +620,78 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
                        voice_text: str = "",
                        seed: int = 44,
                        temperature: float = 0.7,
+                       speed: float = 1.0,
                        speaker_voice_map: dict | None = None,
                        on_segment=None) -> list[dict]:
     """Синтезирует речь через выбранный движок (plugin system)."""
     if speaker_voice_map:
-        return _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed, temperature, on_segment=on_segment)
-    plugin = _TTS_PLUGINS.get(engine)
-    if not plugin:
-        raise ProcessingError(f"TTS движок '{engine}' не найден")
-    return plugin.synthesize(subtitles, out_dir, log, engine=engine, voice=voice,
-                             voice_wav=voice_wav, voice_text=voice_text, seed=seed,
-                             temperature=temperature, on_segment=on_segment)
+        results = _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed, temperature,
+                                     on_segment=on_segment, default_engine=engine, default_voice=voice)
+    else:
+        plugin = _TTS_PLUGINS.get(engine)
+        if not plugin:
+            raise ProcessingError(f"TTS движок '{engine}' не найден")
+        results = plugin.synthesize(subtitles, out_dir, log, engine=engine, voice=voice,
+                                 voice_wav=voice_wav, voice_text=voice_text, seed=seed,
+                                 temperature=temperature, on_segment=on_segment)
+    if speed != 1.0:
+        _apply_tts_speed(results, speed, log)
+    return results
+
+
+def _apply_tts_speed(results: list[dict], speed: float, log):
+    """Change playback speed of generated TTS audio files via ffmpeg atempo."""
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+    import threading as _th
+    counter = [0]
+    lock = _th.Lock()
+
+    def _one(r):
+        path = r.get("audio_path", "")
+        if not path or not os.path.exists(path):
+            return
+        tmp = path + ".tmp.wav"
+        # ffmpeg atempo supports 0.5–100.0; chain filters for extreme values
+        filters = []
+        s = speed
+        while s > 2.0:
+            filters.append("atempo=2.0")
+            s /= 2.0
+        while s < 0.5:
+            filters.append("atempo=0.5")
+            s *= 2.0
+        filters.append(f"atempo={s:.4f}")
+        cmd = ["ffmpeg", "-y", "-i", path, "-af", ",".join(filters), "-ar", "24000", tmp]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode == 0 and os.path.exists(tmp):
+                # На Windows замена падает, если файл открыт (например, плеером)
+                try:
+                    os.replace(tmp, path)
+                except OSError as e:
+                    log(f"   ⚠️ Не удалось заменить {os.path.basename(path)}: {e}")
+                    _safe_remove(tmp)
+                    return
+                with lock:
+                    counter[0] += 1
+            elif os.path.exists(tmp):
+                _safe_remove(tmp)
+        except subprocess.TimeoutExpired:
+            log(f"   ⚠️ Таймаут atempo для {os.path.basename(path)}")
+            _safe_remove(tmp)
+
+    # Файлы независимы — гоняем ffmpeg параллельно
+    with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4) // 2))) as pool:
+        list(pool.map(_one, results))
+    if counter[0]:
+        log(f"   ⚡ Скорость речи: {speed}x ({counter[0]} файлов)")
 
 
 def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
                         speaker_voice_map: dict, seed: int = 44,
-                        temperature: float = 0.7, on_segment=None) -> list[dict]:
+                        temperature: float = 0.7, on_segment=None,
+                        default_engine: str = "", default_voice: str = "") -> list[dict]:
     """Синтезирует речь для нескольких спикеров с разными голосами/движками."""
     log("🔊 Синтезирую речь (мульти-спикер)...")
 
@@ -393,9 +712,13 @@ def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
     for speaker, subs in speaker_groups.items():
         voice_cfg = speaker_voice_map.get(speaker, {})
         if not voice_cfg:
-            voice_cfg = next(iter(speaker_voice_map.values()), {})
-        engine = voice_cfg.get("engine", "edge-tts")
-        voice = voice_cfg.get("voice", "")
+            # Раньше подставлялся первый голос из карты — из-за этого фразы без
+            # метки говорящего звучали чужим голосом. Берём выбранный в настройках.
+            voice_cfg = ({"engine": default_engine, "voice": default_voice}
+                         if default_engine or default_voice
+                         else next(iter(speaker_voice_map.values()), {}))
+        engine = voice_cfg.get("engine") or default_engine or "edge-tts"
+        voice = voice_cfg.get("voice", "") or (default_voice if not voice_cfg.get("engine") else "")
 
         # Reset clone cache for qwen3 plugin if available
         plugin = _TTS_PLUGINS.get(engine)
@@ -423,6 +746,15 @@ def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
     return all_results
 
 
+def lipsync_video(video_path: str, audio_path: str, out_path: str, log,
+                   engine: str = "latentsync", **kwargs) -> str:
+    """Apply lip sync to video using selected engine (plugin system)."""
+    plugin = _LIPSYNC_PLUGINS.get(engine)
+    if not plugin:
+        raise ProcessingError(f"Lip sync движок '{engine}' не найден")
+    return plugin.process(video_path, audio_path, out_path, log, **kwargs)
+
+
 def get_audio_duration(audio_path: str) -> float:
     """Возвращает длительность аудиофайла в секундах через ffprobe."""
     cmd = [
@@ -431,7 +763,7 @@ def get_audio_duration(audio_path: str) -> float:
         "-show_streams",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     data = json.loads(result.stdout)
     for stream in data.get("streams", []):
         if "duration" in stream:
@@ -474,7 +806,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
 
     # Get total video duration
     probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video_path]
-    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True)
+    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8")
     video_duration = float(json.loads(probe_r.stdout).get("format", {}).get("duration", 0))
 
     v_codec = codec if codec != "copy" else "libx264"
@@ -488,6 +820,14 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
 
     # Sort subtitles by start time
     subs_sorted = sorted(subtitles_with_audio, key=lambda s: s["start"])
+
+    # Длительности читаем заранее и параллельно: это по отдельному запуску
+    # ffprobe на каждую фразу, последовательно они складывались в секунды
+    from concurrent.futures import ThreadPoolExecutor
+    _in_range = [s for s in subs_sorted if s["end"] > range_start and s["start"] < range_end]
+    with ThreadPoolExecutor(max_workers=min(16, max(4, (os.cpu_count() or 4)))) as _probe_pool:
+        _durs = dict(zip((s["audio_path"] for s in _in_range),
+                         _probe_pool.map(get_audio_duration, (s["audio_path"] for s in _in_range))))
 
     # Build list of all segments: gaps + TTS slots
     timeline = []  # (type, start, dur, sub_or_None, speed_factor)
@@ -504,7 +844,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
             timeline.append(("gap", cursor, gap, None, 1.0))
 
         slot_dur = sub["end"] - sub["start"]
-        audio_dur = get_audio_duration(sub["audio_path"])
+        audio_dur = _durs.get(sub["audio_path"], 0.0)
         if audio_dur < 0.05:
             audio_dur = slot_dur
 
@@ -518,10 +858,10 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
     if cursor < range_end - 0.01:
         timeline.append(("gap", cursor, range_end - cursor, None, 1.0))
 
-    segment_files = []
     total = len(timeline)
 
-    for i, (seg_type, seg_start, seg_dur, sub, speed_factor) in enumerate(timeline):
+    def _render_segment(i, item):
+        seg_type, seg_start, seg_dur, sub, speed_factor = item
         v_seg = os.path.join(tmp_dir, f"v_{i:04d}.mp4")
         a_seg = os.path.join(tmp_dir, f"a_{i:04d}.wav")
 
@@ -541,7 +881,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 vocals_file = os.path.join(out_dir, "vocals.wav")
                 if os.path.exists(bg_file):
                     if original_audio_mode == "voiceover" and os.path.exists(vocals_file):
-                        # Voiceover gap: bg + vocals (original speaker audible in gaps)
+                        # Voiceover gap: bg (no_vocals_volume) + vocals (vocals_volume)
                         bg_tmp_g = os.path.join(tmp_dir, f"gbg_{i:04d}.wav")
                         voc_tmp_g = os.path.join(tmp_dir, f"gvoc_{i:04d}.wav")
                         subprocess.run([
@@ -559,13 +899,14 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                             "-map", "[out]", "-ar", "44100", "-ac", "2", a_seg
                         ], capture_output=True)
                     else:
-                        cmd_a = [
+                        # no_vocals mode: bg at no_vocals_volume
+                        subprocess.run([
                             "ffmpeg", "-y",
                             "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", bg_file,
+                            "-af", f"volume={no_vocals_volume:.2f}",
                             "-ar", "44100", "-ac", "2", a_seg
-                        ]
-                        subprocess.run(cmd_a, capture_output=True)
+                        ], capture_output=True)
                 else:
                     # Fallback to silence
                     cmd_a = [
@@ -575,13 +916,14 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                     ]
                     subprocess.run(cmd_a, capture_output=True)
             elif original_audio_mode == "full":
-                cmd_a = [
+                # Full audio at original_audio_volume
+                subprocess.run([
                     "ffmpeg", "-y",
                     "-ss", str(seg_start), "-t", str(seg_dur),
                     "-i", video_path,
-                    "-vn", "-ar", "44100", "-ac", "2", a_seg
-                ]
-                subprocess.run(cmd_a, capture_output=True)
+                    "-vn", "-af", f"volume={original_audio_volume:.2f}",
+                    "-ar", "44100", "-ac", "2", a_seg
+                ], capture_output=True)
             else:
                 # none — silence
                 cmd_a = [
@@ -696,32 +1038,52 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                             "-map", "[out]", "-ar", "44100", "-ac", "2", a_seg
                         ], capture_output=True)
                 else:
-                    os.rename(tts_tmp, a_seg)
+                    os.replace(tts_tmp, a_seg)
             else:
-                os.rename(tts_tmp, a_seg)
+                os.replace(tts_tmp, a_seg)
 
-        segment_files.append((v_seg, a_seg))
+        return v_seg, a_seg
 
-        pct = int((i + 1) / total * 100)
-        log(f"   📦 Сегментов: {i+1}/{total} ({pct}%)")
+    # Сегменты независимы, а каждый — это несколько запусков ffmpeg, поэтому
+    # считаем их параллельно: на многоядерной машине сборка ускоряется в разы.
+    from concurrent.futures import ThreadPoolExecutor
+    import threading as _th
+    workers = max(2, min(8, (os.cpu_count() or 4) // 2))
+    done_lock = _th.Lock()
+    done_count = [0]
+
+    def _render_and_report(args):
+        i, item = args
+        result = _render_segment(i, item)
+        with done_lock:
+            done_count[0] += 1
+            n = done_count[0]
+        if n % max(1, total // 20) == 0 or n == total:
+            log(f"   📦 Сегментов: {n}/{total} ({int(n / total * 100)}%)")
+        return result
+
+    log(f"   ⚙️ Рендер сегментов в {workers} потоков...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        segment_files = list(pool.map(_render_and_report, enumerate(timeline)))
 
     # --- Apply volume crossfades at gap↔TTS boundaries ---
     if original_audio_mode in ("full", "voiceover"):
         fade_dur = 0.8  # seconds — match player lookahead
-        for i in range(len(timeline)):
+
+        def _apply_fade(i):
             seg_type = timeline[i][0]
             if seg_type != "gap":
-                continue
+                return
             _, a_seg = segment_files[i]
             seg_dur = timeline[i][2]
             if seg_dur < 0.1:
-                continue
+                return
             # Check if next segment is TTS → fade out end of gap
             fade_out = i + 1 < len(timeline) and timeline[i + 1][0] == "tts"
             # Check if previous segment is TTS → fade in start of gap
             fade_in = i > 0 and timeline[i - 1][0] == "tts"
             if not fade_out and not fade_in:
-                continue
+                return
             af_parts = []
             fd = min(fade_dur, seg_dur / 2)
             if fade_out:
@@ -739,14 +1101,22 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 ], capture_output=True)
                 os.replace(faded, a_seg)
 
+        with ThreadPoolExecutor(max_workers=workers) as fade_pool:
+            list(fade_pool.map(_apply_fade, range(len(timeline))))
+
     # --- Concat ---
     log("🔗 Конкатенирую сегменты...")
     v_list = os.path.join(tmp_dir, "vlist.txt")
     a_list = os.path.join(tmp_dir, "alist.txt")
-    with open(v_list, "w") as fv, open(a_list, "w") as fa:
+    # concat-demuxer трактует \ как escape, поэтому пути пишем через прямой слэш
+    # (Windows их принимает), а одинарные кавычки внутри имени экранируем
+    def _concat_path(p: str) -> str:
+        return p.replace("\\", "/").replace("'", r"'\''")
+
+    with open(v_list, "w", encoding="utf-8") as fv, open(a_list, "w", encoding="utf-8") as fa:
         for v_seg, a_seg in segment_files:
-            fv.write(f"file '{v_seg}'\n")
-            fa.write(f"file '{a_seg}'\n")
+            fv.write(f"file '{_concat_path(v_seg)}'\n")
+            fa.write(f"file '{_concat_path(a_seg)}'\n")
 
     v_concat = os.path.join(tmp_dir, "video_concat.mp4")
     a_concat = os.path.join(tmp_dir, "audio_concat.wav")
@@ -769,7 +1139,10 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
 
     # Burn subtitles
     if burn_subtitles and srt_path and os.path.exists(srt_path):
-        escaped_srt = srt_path.replace("'", r"\'").replace(":", r"\:")
+        # порядок важен: сначала обратный слэш (Windows-пути), потом остальное
+        escaped_srt = (srt_path.replace("\\", "/")
+                               .replace("'", r"\'")
+                               .replace(":", r"\:"))
         cmd_final += ["-vf", f"subtitles='{escaped_srt}'"]
         log("   📺 Субтитры вшиты в видео")
 
@@ -780,14 +1153,14 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
         "-shortest",
         out_path
     ]
-    result = subprocess.run(cmd_final, capture_output=True, text=True)
+    result = subprocess.run(cmd_final, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"ffmpeg (финал) ошибка:\n{result.stderr}")
 
     # Cleanup temp segments
     import shutil
     if os.path.isdir(tmp_dir):
-        shutil.rmtree(tmp_dir)
+        rmtree_safe(tmp_dir)
         log("🧹 Временные файлы удалены")
 
     if original_audio_mode == "full":

@@ -17,21 +17,49 @@ import os
 import sys
 
 
+def _stdin_lines():
+    """Читает команды из stdin в фоне и отдаёт их главному циклу.
+
+    Отдельный поток нужен, чтобы заметить смерть родителя (EOF) даже пока
+    главный поток занят загрузкой модели: иначе воркер остаётся сиротой,
+    держит модель в памяти и конкурирует за GPU. Работает на всех ОС —
+    в отличие от поиска процессов через ps.
+    """
+    import queue as _q
+    import threading as _th
+    q: "_q.Queue" = _q.Queue()
+
+    def _read():
+        try:
+            for line in sys.stdin:
+                q.put(line)
+        except Exception:
+            pass
+        os._exit(0)  # родитель закрыл канал — уходим немедленно
+
+    _th.Thread(target=_read, daemon=True).start()
+    while True:
+        yield q.get()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="k2-fsa/OmniVoice")
     parser.add_argument("--cache_dir", default="")
     args = parser.parse_args()
 
+    # HF_HOME должен быть выставлен ДО импорта huggingface_hub: он читает его
+    # один раз при импорте, иначе модель ищется/качается в ~/.cache
+    if args.cache_dir:
+        os.environ["HF_HOME"] = args.cache_dir
+
+    import time
     import torch
     import soundfile as sf
     from omnivoice import OmniVoice
     # Monkey-patch: disable forced fade+pad (library bug — applies even with postprocess_output=False)
     import omnivoice.models.omnivoice as _omni_mod
     _omni_mod.fade_and_pad_audio = lambda audio, **kw: audio
-
-    if args.cache_dir:
-        os.environ["HF_HOME"] = args.cache_dir
 
     # Device detection
     if torch.cuda.is_available():
@@ -45,7 +73,19 @@ def main():
         dtype = torch.float32
 
     _out({"type": "log", "message": f"📦 Загружаю OmniVoice ({device})..."})
-    model = OmniVoice.from_pretrained(args.model, device_map=device, dtype=dtype)
+    _t0 = time.monotonic()
+    # Веса на диске в float32. Просить device_map=mps вместе с dtype=float16
+    # нельзя: каст выполняется поэлементно Metal-шейдером и занимает минуты
+    # (copy_cast_kernel_mps). Кастуем на CPU, а на устройство переносим готовые
+    # тензоры одним куском.
+    model = OmniVoice.from_pretrained(args.model, dtype=dtype)
+    if device != "cpu":
+        # higgs-audio-tokenizer не работает на MPS — оставляем его на CPU
+        _tok = model.audio_tokenizer
+        model.audio_tokenizer = None
+        model.to(device)
+        model.audio_tokenizer = _tok
+    _out({"type": "log", "message": f"   ✅ Модель загружена за {int(time.monotonic() - _t0)}с"})
 
     # Cache voice clone prompts
     _clone_cache = {}  # ref_audio -> VoiceClonePrompt
@@ -67,7 +107,7 @@ def main():
     _out({"type": "ready"})
 
     # Main loop — read commands from stdin
-    for line in sys.stdin:
+    for line in _stdin_lines():
         line = line.strip()
         if not line:
             continue
@@ -135,9 +175,11 @@ def main():
                     gen_kwargs["instruct"] = instruct
 
                 audio = model.generate(**gen_kwargs, postprocess_output=True, denoise=False)
-                wav = audio[0].cpu().squeeze()
+                # omnivoice 0.2+ возвращает np.ndarray, ранние версии — torch.Tensor
+                out = audio[0]
+                wav = torch.as_tensor(out.cpu() if hasattr(out, "cpu") else out).squeeze()
                 # Trim leading artifact — cut first 200ms then find speech onset
-                sr = 24000
+                sr = int(getattr(model, "sampling_rate", 0) or 24000)
                 trim_200 = int(0.2 * sr)
                 if wav.shape[0] > trim_200 + sr:
                     # Compute RMS energy in 20ms windows

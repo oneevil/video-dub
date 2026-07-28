@@ -6,13 +6,20 @@ ENGINES = {"claude": "Claude (Anthropic)"}
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 NEEDS_MODEL = True
 
-MODELS = [
-    {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
-    {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
-    {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
-]
-
-DEFAULT_MODEL = "claude-sonnet-4-5-20250514"
+def list_models(api_key: str = "") -> list[dict]:
+    """Fetch available models from Anthropic API. Returns list of {id, name} dicts."""
+    if not api_key:
+        return []
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        result = []
+        for m in client.models.list(limit=100).data:
+            display = getattr(m, "display_name", None) or m.id
+            result.append({"id": m.id, "name": display})
+        return result
+    except Exception:
+        return []
 
 
 def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
@@ -20,7 +27,8 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
     import anthropic
     from ._helpers import build_translate_prompt, parse_numbered_response
 
-    model = model or DEFAULT_MODEL
+    if not model:
+        raise ValueError("Не выбрана модель Claude. Откройте настройки и выберите модель.")
     log(f"🌐 Перевожу на {target_lang} через Claude ({model})...")
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -34,10 +42,18 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
 
         resp = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=16000,
             messages=[{"role": "user", "content": prompt}]
         )
-        raw = resp.content[0].text.strip()
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("Claude отклонил запрос на перевод этого фрагмента")
+        # В ответе кроме текста могут быть блоки thinking — берём только текстовые
+        raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not raw:
+            raise RuntimeError(
+                f"Claude вернул пустой ответ (stop_reason={resp.stop_reason}). "
+                "Попробуйте уменьшить размер фрагмента или сменить модель."
+            )
         tr_map = parse_numbered_response(raw, chunk)
         chunk_translated = []
         for sub in chunk:

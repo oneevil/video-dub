@@ -30,7 +30,7 @@ def main():
 
     # Get duration for progress
     dur_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", args.audio]
-    r = subprocess.run(dur_cmd, capture_output=True, text=True)
+    r = subprocess.run(dur_cmd, capture_output=True, text=True, encoding="utf-8")
     total_duration = 1.0
     if r.returncode == 0:
         d = json.loads(r.stdout).get("format", {}).get("duration")

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video-Dub by OneEvil</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%2310b981'/><stop offset='1' stop-color='%2338bdf8'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='url(%23g)'/><path d='M10 8v16l14-8Z' fill='white'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/app.css">
@@ -13,7 +13,7 @@
 
 <header class="header">
   <div class="logo">
-    <div class="logo-icon">🎬</div>
+    <div class="logo-icon"><svg width="16" height="16" viewBox="0 0 32 32" fill="none"><path d="M10 8v16l14-8Z" fill="white"/></svg></div>
     <h1>Video-Dub by OneEvil</h1>
   </div>
   <div class="pipe" id="steps">
@@ -26,10 +26,15 @@
     <span class="step" data-key="tts" title="Синтез речи">озвучка<span class="dot"></span></span>
     <span class="step-sep">·</span>
     <span class="step" data-key="build" title="Сборка">сборка<span class="dot"></span></span>
+    <span class="step-sep" id="lipsyncStepSep" style="display:none">·</span>
+    <span class="step" data-key="lipsync" title="Lip Sync" id="lipsyncStep" style="display:none">lip sync<span class="dot"></span></span>
   </div>
   <div class="header-buttons">
     <button class="theme-toggle" id="settingsBtn" onclick="toggleModal()" title="Настройки">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+    <button class="theme-toggle" id="btnShowLog" onclick="toggleLog()" title="Показать логи">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
     </button>
     <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Переключить тему">
       <svg id="themeIconDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -45,7 +50,6 @@
     <div class="sidebar-scroll">
 
       <!-- Resume -->
-      {% if past_jobs %}
       <div class="resume-panel" id="resumePanel">
         <div class="resume-header" onclick="document.getElementById('resumePanel').classList.toggle('open')">
           <svg id="refreshJobsIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" onclick="event.stopPropagation();refreshJobs()" style="cursor:pointer;opacity:.7" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -54,33 +58,35 @@
         </div>
         <div class="resume-list" id="resumeList">
           {% for j in past_jobs %}
-          <div class="resume-item" id="job-{{ loop.index }}" onclick="resumeJob('{{ j.path }}', this)" data-path="{{ j.path }}">
+          <div class="resume-item" id="job-{{ loop.index }}" onclick="resumeJob(this.dataset.path, this)" data-path="{{ j.path.replace('\\', '/') }}">
             <span style="display:flex;flex-direction:column;gap:1px">
               <span>{{ j.title if j.title else j.name.replace('job_', '').replace('_', ' ') }}</span>
               {% if j.title %}<span style="font-size:9px;color:var(--fg3)">{{ j.name }}</span>{% endif %}
             </span>
             <span class="badges">
-              {% if j.has_video %}<span class="badge badge-video">video</span>{% endif %}
               {% if j.has_srt %}<span class="badge badge-srt">srt</span>{% endif %}
-              {% if j.has_trans %}<span class="badge badge-trans">trans</span>{% endif %}
+              {% if j.has_trans %}<span class="badge badge-trans">trn</span>{% endif %}
+              {% if j.has_tts %}<span class="badge badge-tts">tts</span>{% endif %}
             </span>
-            <button class="btn-delete-job" onclick="deleteJob(event, '{{ j.path }}', this)" title="Удалить">
+            <button class="btn-job-action" onclick="event.stopPropagation();downloadJobZip(this.closest('.resume-item').dataset.path)" title="Скачать .zip">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </button>
+            <button class="btn-delete-job" onclick="deleteJob(event, this.closest('.resume-item').dataset.path, this)" title="Удалить">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
           {% endfor %}
         </div>
       </div>
-      {% endif %}
       <!-- Source -->
       <div>
         <div class="section-label">Проект</div>
-        <div class="field">
-          <input type="text" id="projectName" placeholder="Название проекта (необязательно)">
+        <div class="field" style="display:flex;align-items:center;gap:4px">
+          <input type="text" id="projectName" placeholder="Название проекта (необязательно)" style="flex:1">
+          <button class="btn-job-action" id="btnCloseProject" style="display:none" onclick="closeProject()" title="Закрыть проект">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
-        <button class="btn" id="btnCloseProject" style="display:none;background:var(--bg4);color:var(--fg2);margin-top:4px;margin-bottom:4px" onclick="closeProject()">
-          ✕ Закрыть проект
-        </button>
         <div id="sourceSection">
         <div class="section-label" style="margin-top:8px">Источник</div>
           <div class="field">
@@ -119,17 +125,27 @@
       <div id="subsAndParams" style="display:none">
       <div>
         <div class="section-label">Загрузить субтитры</div>
-        <div class="upload-row">
-          <label class="upload-btn" id="uploadOrigBtn">
-            <span id="uploadOrigIcon" class="upload-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
-            <span id="uploadOrigLabel">Оригинал .srt</span>
-            <input type="file" accept=".srt" id="uploadOrig">
-          </label>
-          <label class="upload-btn" id="uploadTransBtn">
-            <span id="uploadTransIcon" class="upload-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
-            <span id="uploadTransLabel">Перевод .srt</span>
-            <input type="file" accept=".srt" id="uploadTrans">
-          </label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div style="display:flex;align-items:stretch;gap:2px">
+            <label class="upload-btn" id="uploadOrigBtn" style="flex:1">
+              <span id="uploadOrigIcon" class="upload-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
+              <span id="uploadOrigLabel">Оригинал .srt</span>
+              <input type="file" accept=".srt" id="uploadOrig">
+            </label>
+            <button id="deleteOrigBtn" class="btn-delete-subs" disabled onclick="deleteOrigSubs()" title="Удалить оригинальные субтитры">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div style="display:flex;align-items:stretch;gap:2px">
+            <label class="upload-btn" id="uploadTransBtn" style="flex:1">
+              <span id="uploadTransIcon" class="upload-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
+              <span id="uploadTransLabel">Перевод .srt</span>
+              <input type="file" accept=".srt" id="uploadTrans">
+            </label>
+            <button id="deleteTransBtn" class="btn-delete-subs" disabled onclick="deleteTransSubs()" title="Удалить переведённые субтитры">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -162,6 +178,45 @@
             <span style="font-size:10px;color:var(--fg3)">0 = авто</span>
           </div>
         </div>
+        <div class="field">
+          <label>Оригинальное аудио</label>
+          <select id="buildOriginalAudio" onchange="onOriginalAudioChange();persistSetting({build_original_audio: this.value})">
+            <option value="none" {{ 'selected' if default_build_original_audio == 'none' else '' }}>Без оригинального аудио</option>
+            <option value="full" {{ 'selected' if default_build_original_audio == 'full' else '' }}>Полное аудио (фоном, приглушённое)</option>
+            <option value="no_vocals" {{ 'selected' if default_build_original_audio == 'no_vocals' else '' }}>Только фон без голоса (demucs)</option>
+            <option value="voiceover" {{ 'selected' if default_build_original_audio == 'voiceover' else '' }}>Закадровый перевод (фон + голос + перевод)</option>
+          </select>
+        </div>
+        <div class="field" id="fullVolumeField" style="display:none;margin-top:0">
+          <label>Громкость оригинала: <span id="fullVolumeVal">{{ default_build_original_volume }}%</span></label>
+          <input type="range" id="buildOriginalVolume" min="0" max="100" value="{{ default_build_original_volume }}"
+                 style="width:100%;accent-color:var(--accent)"
+                 oninput="document.getElementById('fullVolumeVal').textContent=this.value+'%';persistSetting({build_original_volume: this.value})">
+        </div>
+        <div class="field" id="noVocalsVolumeField" style="display:none;margin-top:0">
+          <label>Громкость фона (без голоса): <span id="noVocalsVolumeVal">{{ default_build_no_vocals_volume }}%</span></label>
+          <input type="range" id="buildNoVocalsVolume" min="0" max="100" value="{{ default_build_no_vocals_volume }}"
+                 style="width:100%;accent-color:var(--accent)"
+                 oninput="document.getElementById('noVocalsVolumeVal').textContent=this.value+'%';persistSetting({build_no_vocals_volume: this.value})">
+        </div>
+        <div class="field" id="vocalsVolumeField" style="display:none;margin-top:0">
+          <label>Громкость оригинального голоса: <span id="vocalsVolumeVal">{{ default_build_vocals_volume }}%</span></label>
+          <input type="range" id="buildVocalsVolume" min="0" max="100" value="{{ default_build_vocals_volume }}"
+                 style="width:100%;accent-color:var(--accent)"
+                 oninput="document.getElementById('vocalsVolumeVal').textContent=this.value+'%';persistSetting({build_vocals_volume: this.value})">
+        </div>
+        {% if lipsync_engines %}
+        <label class="skip-check" id="lipsyncLabel" style="margin-top:4px">
+          <input type="checkbox" id="lipsyncEnabled" onchange="onLipsyncToggle()"> Синхронизация губ (lip sync)
+        </label>
+        <div class="field" id="lipsyncEngineField" style="display:none;margin-top:4px">
+          <select id="lipsyncEngine">
+            {% for key, label in lipsync_engines.items() %}
+            <option value="{{ key }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
       </div>
 
       <!-- Skip steps -->
@@ -170,25 +225,25 @@
         <div class="skip-group">
           <div class="step-row">
             <label class="skip-check">
-              <input type="checkbox" id="doTranscribe" checked> Транскрипция
+              <input type="checkbox" id="doTranscribe" checked onchange="updateStartBtn()"> Транскрипция
             </label>
             <button class="btn-unlock" id="unlockTranscribe" style="display:none" onclick="unlockStep('doTranscribe','unlockTranscribe')" title="Разблокировать"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
           </div>
           <div class="step-row">
             <label class="skip-check">
-              <input type="checkbox" id="doTranslate"> Перевод
+              <input type="checkbox" id="doTranslate" onchange="updateStartBtn()"> Перевод
             </label>
             <button class="btn-unlock" id="unlockTranslate" style="display:none" onclick="unlockStep('doTranslate','unlockTranslate')" title="Разблокировать"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
           </div>
           <div class="step-row">
             <label class="skip-check">
-              <input type="checkbox" id="doTts"> Синтез речи
+              <input type="checkbox" id="doTts" onchange="updateStartBtn()"> Синтез речи
             </label>
             <button class="btn-unlock" id="unlockTts" style="display:none" onclick="unlockStep('doTts','unlockTts')" title="Разблокировать"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
           </div>
           <div class="step-row">
             <label class="skip-check">
-              <input type="checkbox" id="doBuild"> Сборка
+              <input type="checkbox" id="doBuild" onchange="updateStartBtn()"> Сборка
             </label>
           </div>
         </div>
@@ -248,6 +303,14 @@
       <div class="subs-toolbar">
         <div class="section-label">Субтитры</div>
         <span class="count" id="subsCount"></span>
+        <button class="btn-job-action" id="downloadOrigSubs" style="display:none" onclick="downloadSubs('original')" title="Скачать оригинал .srt">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span style="font-size:9px;margin-left:2px">ORG</span>
+        </button>
+        <button class="btn-job-action" id="downloadTransSubs" style="display:none" onclick="downloadSubs('translated')" title="Скачать перевод .srt">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span style="font-size:9px;margin-left:2px">TRN</span>
+        </button>
       </div>
       <div class="speaker-mapping" id="speakerMapping" style="display:none">
         <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--fg2);cursor:pointer" onclick="const l=document.getElementById('speakerMappingList');const a=this.querySelector('.spk-arrow');if(l.style.display==='none'){l.style.display='';a.style.transform=''}else{l.style.display='none';a.style.transform='rotate(-90deg)'}">
@@ -273,6 +336,9 @@
     <div class="section-label">Лог</div>
     <span class="log-dot" id="logDot"></span>
     <span class="log-count" id="logCount">0 записей</span>
+    <button class="btn-job-action" onclick="event.stopPropagation();downloadLog()" title="Скачать лог">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    </button>
   </div>
   <div class="log-body">
     <div id="log"></div>
@@ -311,6 +377,9 @@
         </div>
         <label class="skip-check" style="margin-bottom:8px">
           <input type="checkbox" id="separateVocals" {{ 'checked' if default_separate_vocals else '' }} onchange="persistSetting({separate_vocals: this.checked})"> Разделить голос и фон (demucs)
+        </label>
+        <label class="skip-check" style="margin-bottom:8px" title="Транскрипция режет речь по паузам дыхания, из-за чего фразы обрываются на полуслове и синтез звучит рвано. Склеивает сегменты в законченные предложения перед озвучкой.">
+          <input type="checkbox" id="mergeSentences" {{ 'checked' if default_merge_sentences else '' }} onchange="persistSetting({merge_sentences: this.checked})"> Склеивать субтитры в законченные фразы
         </label>
         <div class="field" id="whisperModelField">
           <label>Whisper модель</label>
@@ -398,25 +467,54 @@
           </select>
         </div>
         <div class="field" id="ttsClonedVoiceField">
-          <label>Голос (клонированный)</label>
+          <label>Клонированный голос</label>
           <select id="ttsVoice" onchange="persistSetting({tts_voice: this.value})">
-            <option value="">По умолчанию</option>
+            <option value="">Нет</option>
             {% for v in voices %}
             <option value="{{ v.name }}" {{ 'selected' if v.name == default_tts_voice else '' }}>{{ v.name }}</option>
             {% endfor %}
           </select>
         </div>
         <div class="field" id="ttsEdgeVoiceField" style="display:none">
-          <label>Голос (Edge TTS)</label>
+          <label>Голос</label>
           <select id="ttsEdgeVoice" onchange="persistSetting({tts_voice: this.value})">
             <option value="">Загрузка...</option>
           </select>
         </div>
         <div class="field" id="ttsMacosVoiceField" style="display:none">
-          <label>Голос (macOS)</label>
+          <label>Голос</label>
           <select id="ttsMacosVoice" onchange="persistSetting({tts_voice: this.value})">
             <option value="">Загрузка...</option>
           </select>
+        </div>
+        <div id="ttsVoiceModeField" style="display:none">
+          <div class="field" style="margin-bottom:4px">
+            <label>Режим голоса</label>
+            <div style="display:flex;gap:12px;margin-top:2px">
+              <label style="font-size:12px;font-weight:400;display:flex;align-items:center;gap:4px;cursor:pointer">
+                <input type="radio" name="ttsVoiceMode" value="preset" checked onchange="onVoiceModeChange()"> Предустановленный
+              </label>
+              <label style="font-size:12px;font-weight:400;display:flex;align-items:center;gap:4px;cursor:pointer">
+                <input type="radio" name="ttsVoiceMode" value="clone" onchange="onVoiceModeChange()"> Клонированный
+              </label>
+            </div>
+          </div>
+          <div class="field" id="ttsPresetVoiceWrap">
+            <select id="ttsElevenlabsVoice" onchange="persistSetting({tts_voice: this.value})" style="display:none">
+              <option value="">Загрузка...</option>
+            </select>
+            <select id="ttsFishVoice" onchange="persistSetting({tts_voice: this.value})" style="display:none">
+              <option value="">Загрузка...</option>
+            </select>
+          </div>
+          <div class="field" id="ttsCloneVoiceWrap" style="display:none">
+            <select id="ttsCloneVoiceForCloud" onchange="persistSetting({tts_voice: this.value})">
+              <option value="">Нет</option>
+              {% for v in voices %}
+              <option value="{{ v.name }}" {{ 'selected' if v.name == default_tts_voice else '' }}>{{ v.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
         </div>
         <div class="field">
           <label>Тест голоса</label>
@@ -428,18 +526,27 @@
             </button>
           </div>
         </div>
-        <div id="ttsSeedTempRow" style="display:none;grid-template-columns:1fr 1fr;gap:0 12px">
+        <div id="ttsSeedTempRow" style="display:none;grid-template-columns:1fr 1fr 1fr;gap:0 12px">
         <div class="field" id="ttsSeedField">
-          <label>Seed интонации</label>
-          <div style="display:flex;align-items:center;gap:8px">
-            <input type="checkbox" id="ttsSeedEnabled" {{ 'checked' if default_tts_seed >= 0 else '' }} onchange="document.getElementById('ttsSeed').disabled=!this.checked;persistSetting({tts_seed: this.checked ? parseInt(document.getElementById('ttsSeed').value) : -1})" style="width:auto">
-            <input type="number" id="ttsSeed" value="{{ default_tts_seed if default_tts_seed >= 0 else 0 }}" min="0" max="9999" style="width:80px" {{ 'disabled' if default_tts_seed < 0 else '' }} onchange="persistSetting({tts_seed: parseInt(this.value)})">
-          </div>
+          <label>Seed интонации <span id="ttsSeedValue" style="opacity:.6">{{ default_tts_seed if default_tts_seed >= 0 else 'выкл' }}</span></label>
+          <input type="range" id="ttsSeed" min="0" max="100" step="1" value="{{ default_tts_seed if default_tts_seed >= 0 else 0 }}" style="width:100%" oninput="document.getElementById('ttsSeedValue').textContent=this.value==0?'выкл':this.value" onchange="persistSetting({tts_seed: parseInt(this.value) || -1})">
         </div>
         <div class="field" id="ttsTempField">
           <label>Стабильность голоса <span id="ttsTempValue" style="opacity:.6">{{ default_tts_temperature }}</span></label>
           <input type="range" id="ttsTemperature" min="0.1" max="0.9" step="0.1" value="{{ default_tts_temperature }}" style="width:100%" oninput="document.getElementById('ttsTempValue').textContent=this.value" onchange="persistSetting({tts_temperature: parseFloat(this.value)})">
         </div>
+        <div class="field" id="ttsSpeedField">
+          <label>Скорость речи <span id="ttsSpeedValue" style="opacity:.6">{{ default_tts_speed }}x</span></label>
+          <input type="range" id="ttsSpeed" min="0.5" max="2.0" step="0.1" value="{{ default_tts_speed }}" style="width:100%" oninput="document.getElementById('ttsSpeedValue').textContent=this.value+'x'" onchange="persistSetting({tts_speed: parseFloat(this.value)})">
+        </div>
+        </div>
+        <div class="field" id="ttsElevenlabsKeyField" style="display:none">
+          <label>API Key{% if elevenlabs_api_key %}<span style="color:var(--accent);font-size:10px"> (.env)</span>{% endif %}</label>
+          <input type="text" id="elevenlabsApiKey" value="{{ elevenlabs_api_key or '' }}" placeholder="sk-..." style="font-family:'JetBrains Mono',monospace;font-size:11px" onchange="persistSetting({elevenlabs_api_key: this.value})">
+        </div>
+        <div class="field" id="ttsFishKeyField" style="display:none">
+          <label>API Key{% if fish_api_key %}<span style="color:var(--accent);font-size:10px"> (.env)</span>{% endif %}</label>
+          <input type="text" id="fishApiKey" value="{{ fish_api_key or '' }}" placeholder="sk-..." style="font-family:'JetBrains Mono',monospace;font-size:11px" onchange="persistSetting({fish_api_key: this.value})">
         </div>
 
       </div>
@@ -531,33 +638,6 @@
             <option value="4.0" {{ 'selected' if default_build_max_slowdown == '4.0' else '' }}>4x</option>
             <option value="5.0" {{ 'selected' if default_build_max_slowdown == '5.0' else '' }}>5x</option>
           </select>
-        </div>
-        <div class="field">
-          <label>Оригинальное аудио</label>
-          <select id="buildOriginalAudio" onchange="onOriginalAudioChange();persistSetting({build_original_audio: this.value})">
-            <option value="none" {{ 'selected' if default_build_original_audio == 'none' else '' }}>Без оригинального аудио</option>
-            <option value="full" {{ 'selected' if default_build_original_audio == 'full' else '' }}>Полное аудио (фоном, приглушённое)</option>
-            <option value="no_vocals" {{ 'selected' if default_build_original_audio == 'no_vocals' else '' }}>Только фон без голоса (demucs)</option>
-            <option value="voiceover" {{ 'selected' if default_build_original_audio == 'voiceover' else '' }}>Закадровый перевод (фон + голос + перевод)</option>
-          </select>
-        </div>
-        <div class="field" id="fullVolumeField" style="display:none;margin-top:0">
-          <label>Громкость оригинала: <span id="fullVolumeVal">{{ default_build_original_volume }}%</span></label>
-          <input type="range" id="buildOriginalVolume" min="0" max="100" value="{{ default_build_original_volume }}"
-                 style="width:100%;accent-color:var(--accent)"
-                 oninput="document.getElementById('fullVolumeVal').textContent=this.value+'%';persistSetting({build_original_volume: this.value})">
-        </div>
-        <div class="field" id="noVocalsVolumeField" style="display:none;margin-top:0">
-          <label>Громкость фона (без голоса): <span id="noVocalsVolumeVal">{{ default_build_no_vocals_volume }}%</span></label>
-          <input type="range" id="buildNoVocalsVolume" min="0" max="100" value="{{ default_build_no_vocals_volume }}"
-                 style="width:100%;accent-color:var(--accent)"
-                 oninput="document.getElementById('noVocalsVolumeVal').textContent=this.value+'%';persistSetting({build_no_vocals_volume: this.value})">
-        </div>
-        <div class="field" id="vocalsVolumeField" style="display:none;margin-top:0">
-          <label>Громкость оригинального голоса: <span id="vocalsVolumeVal">{{ default_build_vocals_volume }}%</span></label>
-          <input type="range" id="buildVocalsVolume" min="0" max="100" value="{{ default_build_vocals_volume }}"
-                 style="width:100%;accent-color:var(--accent)"
-                 oninput="document.getElementById('vocalsVolumeVal').textContent=this.value+'%';persistSetting({build_vocals_volume: this.value})">
         </div>
         <label class="skip-check" style="margin-top:6px">
           <input type="checkbox" id="buildBurnSubs" {{ 'checked' if default_build_burn_subs else '' }} onchange="persistSetting({build_burn_subs: this.checked})"> Вшить субтитры в видео

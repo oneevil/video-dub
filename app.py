@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Video Translator — Flask web app."""
 
-import json as json_mod
 import os
+# Ensure UTF-8 everywhere on Windows (pipes, file I/O) before any other imports
+os.environ.setdefault("PYTHONUTF8", "1")
+
+import json as json_mod
 import queue
 import shutil
 import threading
@@ -11,7 +14,83 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+import mimetypes
 from flask import Flask, Response, jsonify, render_template, request, send_file
+
+
+def _coop_sleep(seconds: float):
+    """Пауза, не блокирующая gevent-цикл.
+
+    monkey-patching не применяется, поэтому обычный time.sleep/queue.get внутри
+    обработчика останавливал бы весь сервер на время ожидания.
+    """
+    try:
+        import gevent
+        gevent.sleep(seconds)
+    except Exception:
+        import time as _t
+        _t.sleep(seconds)
+
+
+def _is_within(path: str, allowed_dir: str, strict: bool = False) -> bool:
+    """Проверяет, что path лежит внутри allowed_dir.
+
+    startswith тут недостаточно: '/projects_old' проходил проверку для '/projects'.
+    strict=True дополнительно запрещает сам allowed_dir (для удаления папок).
+    """
+    # normcase: на Windows пути регистронезависимы и разделитель может быть
+    # любым — без него легитимный C:\Projects vs c:/projects давал бы 403
+    real = os.path.normcase(os.path.realpath(path))
+    allowed = os.path.normcase(os.path.realpath(allowed_dir))
+    if real == allowed:
+        return not strict
+    return real.startswith(allowed + os.sep)
+
+
+def _stream_file(path):
+    """Stream a file without holding the handle open (Windows fix)."""
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    size = os.path.getsize(path)
+
+    range_header = request.headers.get("Range")
+    if range_header:
+        # Parse Range: bytes=start-end
+        import re
+        m = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        start = int(m.group(1)) if m else 0
+        end = int(m.group(2)) if m and m.group(2) else size - 1
+        length = end - start + 1
+
+        def generate():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return Response(generate(), status=206, mimetype=mime, headers={
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        })
+
+    def generate():
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    return Response(generate(), mimetype=mime, headers={
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(size),
+    })
+
 
 from pipeline import (
     BUILD_AUDIO_BITRATES,
@@ -19,6 +98,7 @@ from pipeline import (
     BUILD_FORMATS,
     BUILD_PRESETS,
     LANGUAGES,
+    LIPSYNC_ENGINES,
     SOURCE_LANGUAGES,
     TRANSCRIBE_ENGINES,
     TRANSLATE_ENGINES,
@@ -31,6 +111,7 @@ from pipeline import (
     check_dependencies,
     download_video,
     extract_audio,
+    lipsync_video,
     parse_srt,
     synthesize_speech,
     transcribe_audio,
@@ -45,27 +126,31 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 CUSTOM_API_KEY = os.environ.get("CUSTOM_API_KEY", "")
 CUSTOM_API_URL = os.environ.get("CUSTOM_API_URL", "")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+FISH_API_KEY = os.environ.get("FISH_API_KEY", "")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 TRANSLATE_PROVIDER = os.environ.get("TRANSLATE_PROVIDER", "claude")
-TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "claude-haiku-4-5")
-DEFAULT_TRANSCRIBE_ENGINE = os.environ.get("TRANSCRIBE_ENGINE", "openai-whisper")
-DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
-DEFAULT_TTS_ENGINE = os.environ.get("TTS_ENGINE", "qwen3-1.7b-base")
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "claude-sonnet-4-5")
+DEFAULT_TRANSCRIBE_ENGINE = os.environ.get("TRANSCRIBE_ENGINE", "faster-whisper")
+DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+DEFAULT_TTS_ENGINE = os.environ.get("TTS_ENGINE", "omnivoice")
 DEFAULT_TTS_VOICE = os.environ.get("TTS_VOICE", "")
 DEFAULT_TTS_SEED = int(os.environ.get("TTS_SEED", "44"))
-DEFAULT_TTS_TEMPERATURE = float(os.environ.get("TTS_TEMPERATURE", "0.7"))
+DEFAULT_TTS_TEMPERATURE = float(os.environ.get("TTS_TEMPERATURE", "0.5"))
+DEFAULT_TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.0"))
 DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.expanduser(
-    os.environ.get("OUTPUT_DIR", str(Path.home() / "projects"))
+    os.environ.get("OUTPUT_DIR", "./projects")
 ))
 DEFAULT_SEPARATE_VOCALS = os.environ.get("SEPARATE_VOCALS", "true").lower() == "true"
+DEFAULT_MERGE_SENTENCES = os.environ.get("MERGE_SENTENCES", "true").lower() == "true"
 DEFAULT_BUILD_FORMAT = os.environ.get("BUILD_FORMAT", "mp4")
 DEFAULT_BUILD_CODEC = os.environ.get("BUILD_CODEC", "copy")
-DEFAULT_BUILD_PRESET = os.environ.get("BUILD_PRESET", "medium")
+DEFAULT_BUILD_PRESET = os.environ.get("BUILD_PRESET", "fast")
 DEFAULT_BUILD_AUDIO_BITRATE = os.environ.get("BUILD_AUDIO_BITRATE", "128k")
 DEFAULT_BUILD_MAX_SLOWDOWN = os.environ.get("BUILD_MAX_SLOWDOWN", "3.0")
-DEFAULT_BUILD_ORIGINAL_AUDIO = os.environ.get("BUILD_ORIGINAL_AUDIO", "no_vocals")
-DEFAULT_BUILD_ORIGINAL_VOLUME = os.environ.get("BUILD_ORIGINAL_VOLUME", "10")
-DEFAULT_BUILD_NO_VOCALS_VOLUME = os.environ.get("BUILD_NO_VOCALS_VOLUME", "50")
+DEFAULT_BUILD_ORIGINAL_AUDIO = os.environ.get("BUILD_ORIGINAL_AUDIO", "voiceover")
+DEFAULT_BUILD_ORIGINAL_VOLUME = os.environ.get("BUILD_ORIGINAL_VOLUME", "15")
+DEFAULT_BUILD_NO_VOCALS_VOLUME = os.environ.get("BUILD_NO_VOCALS_VOLUME", "90")
 DEFAULT_BUILD_VOCALS_VOLUME = os.environ.get("BUILD_VOCALS_VOLUME", "15")
 DEFAULT_BUILD_BURN_SUBS = os.environ.get("BUILD_BURN_SUBS", "false").lower() == "true"
 
@@ -76,6 +161,19 @@ app = Flask(__name__, template_folder="app", static_folder="app", static_url_pat
 # ── Job storage ──────────────────────────────────────────────────────────────
 
 jobs: dict[str, "Job"] = {}
+_MAX_KEPT_JOBS = 20
+
+
+def _prune_jobs():
+    """Держим в памяти только последние задания — иначе журналы копятся бесконечно."""
+    if len(jobs) <= _MAX_KEPT_JOBS:
+        return
+    finished = sorted(
+        (j for j in jobs.values() if j.state in ("done", "error")),
+        key=lambda j: j.created_at,
+    )
+    for job in finished[:len(jobs) - _MAX_KEPT_JOBS]:
+        jobs.pop(job.id, None)
 
 
 class Job:
@@ -88,7 +186,12 @@ class Job:
         self.whisper_model = whisper_model
         self.transcribe_engine = transcribe_engine
         self.output_dir = DEFAULT_OUTPUT_DIR
-        self.messages: queue.Queue[dict] = queue.Queue()
+        # Журнал событий + условие вместо очереди: очередь отдаёт каждое событие
+        # ровно одному читателю, поэтому при второй вкладке/перезагрузке
+        # страницы события делились между соединениями и часть терялась.
+        self.events: list[dict] = []
+        self.events_lock = threading.Lock()
+        self.created_at = datetime.now()
         self.subtitles: list[dict] | None = None
         self.translated: list[dict] | None = None
         self.source_video: str | None = None
@@ -103,6 +206,7 @@ class Job:
         self.skip_tts = False
         self.skip_build = False
         self.separate_vocals = False
+        self.merge_sentences = DEFAULT_MERGE_SENTENCES
         # Translation settings
         self.translate_provider = TRANSLATE_PROVIDER
         self.translate_model = TRANSLATE_MODEL
@@ -114,6 +218,7 @@ class Job:
         self.tts_voice_text = ""
         self.tts_seed = DEFAULT_TTS_SEED
         self.tts_temperature = DEFAULT_TTS_TEMPERATURE
+        self.tts_speed = DEFAULT_TTS_SPEED
         self.num_speakers = 0
         self.speaker_voice_map = None
         # Build settings
@@ -129,6 +234,9 @@ class Job:
         self.build_burn_subs = False
         self.build_start_sec = 0
         self.build_end_sec = 0  # 0 = до конца
+        # Lip sync
+        self.lipsync_enabled = False
+        self.lipsync_engine = ""
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -216,7 +324,7 @@ def index():
             if not os.path.isdir(d) or not name.startswith("job_"):
                 continue
             info = {"name": name, "path": d, "title": "",
-                    "has_video": False, "has_srt": False, "has_trans": False}
+                    "has_video": False, "has_srt": False, "has_trans": False, "has_tts": False}
             # Read meta.json for title
             meta_path = os.path.join(d, "meta.json")
             if os.path.exists(meta_path):
@@ -232,6 +340,8 @@ def index():
                     break
             info["has_srt"] = os.path.exists(os.path.join(d, "original.srt"))
             info["has_trans"] = os.path.exists(os.path.join(d, "translated.srt"))
+            tts_dir = os.path.join(d, "tts_audio")
+            info["has_tts"] = os.path.isdir(tts_dir) and any(f.endswith(".wav") for f in os.listdir(tts_dir))
             past_jobs.append(info)
     past_jobs = past_jobs[:20]
 
@@ -255,7 +365,9 @@ def index():
         default_tts_voice=DEFAULT_TTS_VOICE,
         default_tts_seed=DEFAULT_TTS_SEED,
         default_tts_temperature=DEFAULT_TTS_TEMPERATURE,
+        default_tts_speed=DEFAULT_TTS_SPEED,
         default_separate_vocals=DEFAULT_SEPARATE_VOCALS,
+        default_merge_sentences=DEFAULT_MERGE_SENTENCES,
         voices=get_voices(),
         build_formats=BUILD_FORMATS,
         build_codecs=BUILD_CODECS,
@@ -273,7 +385,10 @@ def index():
         default_build_burn_subs=DEFAULT_BUILD_BURN_SUBS,
         past_jobs=past_jobs,
         hf_token=HF_TOKEN,
+        elevenlabs_api_key=ELEVENLABS_API_KEY,
+        fish_api_key=FISH_API_KEY,
         tts_download_engines=_get_tts_download_engines(),
+        lipsync_engines=LIPSYNC_ENGINES,
         transcribe_download_engines=_get_transcribe_download_engines(),
     )
 
@@ -326,6 +441,7 @@ def start():
     job.skip_tts = skip_tts
     job.skip_build = skip_build
     job.separate_vocals = data.get("separate_vocals", False)
+    job.merge_sentences = data.get("merge_sentences", DEFAULT_MERGE_SENTENCES)
     job.translate_provider = provider
     job.translate_model = translate_model
     job.translate_base_url = base_url
@@ -333,6 +449,7 @@ def start():
     job.tts_voice = data.get("tts_voice", "")
     job.tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
     job.tts_temperature = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
+    job.tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
     job.num_speakers = int(data.get("num_speakers", 0))
     job.speaker_voice_map = data.get("speaker_voice_map")
     if job.tts_voice:
@@ -350,6 +467,8 @@ def start():
     job.build_vocals_volume = float(data.get("build_vocals_volume", 0.15))
     job.build_start_sec = float(data.get("build_start_sec", 0))
     job.build_end_sec = float(data.get("build_end_sec", 0))
+    job.lipsync_enabled = data.get("lipsync_enabled", False)
+    job.lipsync_engine = data.get("lipsync_engine", "")
 
     # Pre-loaded subtitles from upload
     if data.get("original_subs"):
@@ -361,6 +480,7 @@ def start():
     if data.get("work_dir"):
         job.work_dir = data["work_dir"]
 
+    _prune_jobs()
     jobs[job.id] = job
 
     thread = threading.Thread(target=_run_pipeline, args=(job, api_key), daemon=True)
@@ -376,12 +496,22 @@ def progress(job_id: str):
         return "Not found", 404
 
     def stream():
+        # Каждое соединение читает журнал с начала — при переподключении
+        # ничего не теряется, а параллельные вкладки видят одно и то же.
+        idx = 0
+        idle = 0.0
         while True:
-            try:
-                msg = job.messages.get(timeout=30)
-            except queue.Empty:
-                yield "event: ping\ndata: {}\n\n"
+            with job.events_lock:
+                msg = job.events[idx] if idx < len(job.events) else None
+            if msg is None:
+                _coop_sleep(0.25)
+                idle += 0.25
+                if idle >= 30:
+                    idle = 0.0
+                    yield "event: ping\ndata: {}\n\n"
                 continue
+            idle = 0.0
+            idx += 1
             yield f"event: {msg['event']}\ndata: {json_mod.dumps(msg['data'], ensure_ascii=False)}\n\n"
             if msg["event"] in ("done", "error"):
                 break
@@ -427,9 +557,7 @@ def save_srt_direct():
     if not work_dir or not os.path.isdir(work_dir):
         return jsonify(error="Папка не найдена"), 404
     # Security check
-    real = os.path.realpath(work_dir)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR):
         return jsonify(error="Недопустимый путь"), 403
     if "original" in data:
         write_srt(data["original"], os.path.join(work_dir, "original.srt"))
@@ -445,9 +573,7 @@ def save_speaker_mapping():
     mapping = data.get("mapping", {})
     if not work_dir or not os.path.isdir(work_dir):
         return jsonify(error="Папка не найдена"), 404
-    real = os.path.realpath(work_dir)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR):
         return jsonify(error="Недопустимый путь"), 403
     map_type = data.get("type", "voice_mapping")
     if map_type == "speaker_map":
@@ -481,7 +607,7 @@ def serve_video(job_id: str):
     path = job.result_path or job.source_video
     if not path or not os.path.exists(path):
         return "Not found", 404
-    return send_file(path, mimetype="video/mp4")
+    return _stream_file(path)
 
 
 @app.route("/source/<job_id>")
@@ -489,7 +615,7 @@ def serve_source(job_id: str):
     job = jobs.get(job_id)
     if not job or not job.source_video or not os.path.exists(job.source_video):
         return "Not found", 404
-    return send_file(job.source_video, mimetype="video/mp4")
+    return _stream_file(job.source_video)
 
 
 @app.route("/download-video")
@@ -617,6 +743,8 @@ def past_jobs():
         info["has_video"] = has_video
         info["has_srt"] = os.path.exists(os.path.join(d, "original.srt"))
         info["has_trans"] = os.path.exists(os.path.join(d, "translated.srt"))
+        tts_dir = os.path.join(d, "tts_audio")
+        info["has_tts"] = os.path.isdir(tts_dir) and any(f.endswith(".wav") for f in os.listdir(tts_dir))
         if has_video or info["has_srt"]:
             result.append(info)
     return jsonify(jobs=result[:20])
@@ -629,6 +757,8 @@ def resume_job():
     work_dir = data.get("path", "")
     if not os.path.isdir(work_dir):
         return jsonify(error="Папка не найдена"), 404
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR, strict=True):
+        return jsonify(error="Недопустимый путь"), 403
     result = {"work_dir": work_dir, "files": {}}
     # Load meta
     meta_path = os.path.join(work_dir, "meta.json")
@@ -713,6 +843,81 @@ def list_macos_voices():
                 lang = m.group(2).strip()
                 voices.append({"name": name, "lang": lang})
         return jsonify(voices=voices)
+    except Exception:
+        return jsonify(voices=[])
+
+
+@app.route("/translate-models/<engine>")
+def list_translate_models(engine):
+    """Fetch available models for a translation provider (Claude/OpenAI)."""
+    try:
+        from plugins.translate import discover_plugins as _dt
+        _, plugins = _dt()
+        plugin = plugins.get(engine)
+        if not plugin:
+            return jsonify(models=[])
+        if hasattr(plugin, "list_models"):
+            api_key_env = getattr(plugin, "API_KEY_ENV", "")
+            api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+            return jsonify(models=plugin.list_models(api_key))
+        return jsonify(models=getattr(plugin, "MODELS", []))
+    except Exception as e:
+        return jsonify(models=[], error=str(e))
+
+
+@app.route("/elevenlabs-voices")
+def list_elevenlabs_voices():
+    """List available ElevenLabs voices."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        return jsonify(voices=[])
+    try:
+        from elevenlabs.client import ElevenLabs
+        client = ElevenLabs(api_key=api_key)
+        resp = client.voices.get_all()
+        # Sort: IVC (cloned) voices first, then others
+        cloned = []
+        preset = []
+        for v in resp.voices:
+            entry = {"name": v.name, "id": v.voice_id, "lang": ", ".join(v.labels.values()) if v.labels else ""}
+            if v.category == "cloned" or (v.labels and v.labels.get("use_case") == "instant_voice_clone"):
+                cloned.append(entry)
+            else:
+                preset.append(entry)
+        return jsonify(voices=cloned + preset)
+    except Exception:
+        return jsonify(voices=[])
+
+
+@app.route("/fish-voices")
+def list_fish_voices():
+    """List Fish Audio voice models — own models first, then popular."""
+    try:
+        import httpx
+        api_key = os.environ.get("FISH_API_KEY", "")
+        result = []
+        # Own models first
+        if api_key:
+            try:
+                r = httpx.get("https://api.fish.audio/model",
+                              headers={"Authorization": f"Bearer {api_key}"},
+                              params={"page_number": 1, "page_size": 50, "self": True},
+                              timeout=10)
+                if r.status_code == 200:
+                    for m in r.json().get("items", []):
+                        result.append({"name": f"🎙 {m.get('title', '')}", "id": m.get("_id", ""),
+                                       "lang": ", ".join(m.get("languages", []))})
+            except Exception:
+                pass
+        # Public popular models
+        resp = httpx.get("https://api.fish.audio/model",
+                         params={"page_number": 1, "page_size": 50},
+                         timeout=10)
+        if resp.status_code == 200:
+            for m in resp.json().get("items", []):
+                result.append({"name": m.get("title", ""), "id": m.get("_id", ""),
+                               "lang": ", ".join(m.get("tags", [])[:3])})
+        return jsonify(voices=result)
     except Exception:
         return jsonify(voices=[])
 
@@ -838,7 +1043,8 @@ def delete_voice():
     voice_dir = os.path.join(VOICES_DIR, name)
     if not os.path.isdir(voice_dir):
         return jsonify(error="Голос не найден"), 404
-    shutil.rmtree(voice_dir)
+    from pipeline import rmtree_safe
+    rmtree_safe(voice_dir)
     return jsonify(ok=True)
 
 
@@ -872,14 +1078,13 @@ def serve_voice_audio():
     if not name or not file:
         return "Not found", 404
     path = os.path.join(VOICES_DIR, name, file)
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(VOICES_DIR)
-    if not real.startswith(allowed) or not os.path.exists(real):
+    if not _is_within(path, VOICES_DIR) or not os.path.exists(path):
         return "Not found", 404
-    return send_file(real, mimetype="audio/wav")
+    return send_file(os.path.realpath(path), mimetype="audio/wav")
 
 
 _tts_tasks: dict[str, queue.Queue] = {}
+_MAX_TTS_TASKS = 20
 
 @app.route("/tts-test", methods=["POST"])
 def tts_test():
@@ -898,9 +1103,13 @@ def tts_test():
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
     tts_temp = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
+    tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
 
     task_id = uuid.uuid4().hex[:8]
     q: queue.Queue = queue.Queue()
+    # если клиент так и не подключился к прогрессу, запись осталась бы навсегда
+    while len(_tts_tasks) >= _MAX_TTS_TASKS:
+        _tts_tasks.pop(next(iter(_tts_tasks)), None)
     _tts_tasks[task_id] = q
 
     def run():
@@ -914,6 +1123,7 @@ def tts_test():
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
                 seed=tts_seed, temperature=tts_temp,
+                speed=tts_speed,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -932,12 +1142,18 @@ def tts_task_progress(task_id: str):
         return "Not found", 404
 
     def stream():
+        idle = 0.0
         while True:
             try:
-                msg = q.get(timeout=60)
+                msg = q.get_nowait()
             except queue.Empty:
-                yield "event: ping\ndata: {}\n\n"
+                _coop_sleep(0.25)
+                idle += 0.25
+                if idle >= 30:
+                    idle = 0.0
+                    yield "event: ping\ndata: {}\n\n"
                 continue
+            idle = 0.0
             yield f"event: {msg['event']}\ndata: {json_mod.dumps(msg['data'], ensure_ascii=False)}\n\n"
             if msg["event"] in ("done", "error"):
                 _tts_tasks.pop(task_id, None)
@@ -1034,13 +1250,11 @@ def delete_model():
     if not path or not os.path.exists(path):
         return jsonify(error="Модель не найдена"), 404
     from pipeline import WHISPER_MODELS_DIR, TTS_MODELS_DIR
-    real = os.path.realpath(path)
-    allowed_w = os.path.realpath(WHISPER_MODELS_DIR)
-    allowed_t = os.path.realpath(TTS_MODELS_DIR)
-    if not (real.startswith(allowed_w) or real.startswith(allowed_t)):
+    if not (_is_within(path, WHISPER_MODELS_DIR) or _is_within(path, TTS_MODELS_DIR)):
         return jsonify(error="Недопустимый путь"), 403
+    from pipeline import rmtree_safe
     if os.path.isdir(path):
-        shutil.rmtree(path)
+        rmtree_safe(path)
     else:
         os.remove(path)
     return jsonify(ok=True)
@@ -1054,12 +1268,72 @@ def delete_job():
     if not path or not os.path.isdir(path):
         return jsonify(error="Папка не найдена"), 404
     # Security: only allow deleting from output dir
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed) or real == allowed:
+    if not _is_within(path, DEFAULT_OUTPUT_DIR, strict=True):
         return jsonify(error="Недопустимый путь"), 403
-    shutil.rmtree(path)
+    import subprocess as _sp, sys as _sys
+    try:
+        if _sys.platform == "win32":
+            _sp.run(["cmd", "/c", "rmdir", "/s", "/q", os.path.realpath(path)],
+                    capture_output=True, timeout=10)
+        else:
+            from pipeline import rmtree_safe
+            rmtree_safe(path)
+    except Exception as e:
+        return jsonify(error=f"Не удалось удалить: {e}"), 500
+    if os.path.isdir(path):
+        return jsonify(error="Папка не удалена — файлы заняты другим процессом. Закройте видео и попробуйте снова."), 500
     return jsonify(ok=True)
+
+
+@app.route("/download-job-zip")
+def download_job_zip():
+    """Download a job folder as a ZIP archive."""
+    import zipfile
+    path = request.args.get("path", "")
+    if not path or not os.path.isdir(path):
+        return "Папка не найдена", 404
+    if not _is_within(path, DEFAULT_OUTPUT_DIR, strict=True):
+        return "Недопустимый путь", 403
+    real = os.path.realpath(path)
+    job_name = os.path.basename(real)
+    skip_files = {"vocals.wav", "no_vocals.wav", "audio.wav"}
+    # Пишем во временный файл, а не в BytesIO: проект с видео легко весит
+    # гигабайты, и целиком в памяти это лишний риск на любой платформе
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(prefix="job_zip_", suffix=".zip", delete=False)
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
+            for root, _dirs, files in os.walk(real):
+                # Skip tts_audio to keep zip small
+                rel_root = os.path.relpath(root, real)
+                if rel_root.startswith("tts_audio"):
+                    continue
+                for fname in files:
+                    if fname in skip_files:
+                        continue
+                    fpath = os.path.join(root, fname)
+                    arcname = os.path.join(job_name, os.path.relpath(fpath, real))
+                    zf.write(fpath, arcname)
+    except Exception:
+        os.unlink(tmp.name)
+        raise
+
+    def _stream_and_cleanup():
+        try:
+            with open(tmp.name, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    return Response(_stream_and_cleanup(), mimetype="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="{job_name}.zip"',
+        "Content-Length": str(os.path.getsize(tmp.name)),
+    })
 
 
 @app.route("/job-video")
@@ -1069,11 +1343,9 @@ def serve_job_video():
     if not path or not os.path.exists(path):
         return "Not found", 404
     # Security: only serve from output dir
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(path, DEFAULT_OUTPUT_DIR):
         return "Forbidden", 403
-    return send_file(real, mimetype="video/mp4")
+    return _stream_file(os.path.realpath(path))
 
 
 @app.route("/tts-single", methods=["POST"])
@@ -1086,9 +1358,7 @@ def tts_single():
     if not work_dir or not text:
         return jsonify(error="work_dir и text обязательны"), 400
     # Security
-    real = os.path.realpath(work_dir)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR):
         return jsonify(error="Недопустимый путь"), 403
 
     tts_engine = data.get("tts_engine", DEFAULT_TTS_ENGINE)
@@ -1100,6 +1370,7 @@ def tts_single():
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
     tts_temp = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
+    tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
     # Delete existing segment so it gets regenerated
     existing = os.path.join(work_dir, "tts_audio", f"seg_{index:04d}.wav")
     if os.path.exists(existing):
@@ -1107,6 +1378,9 @@ def tts_single():
 
     task_id = uuid.uuid4().hex[:8]
     q: queue.Queue = queue.Queue()
+    # если клиент так и не подключился к прогрессу, запись осталась бы навсегда
+    while len(_tts_tasks) >= _MAX_TTS_TASKS:
+        _tts_tasks.pop(next(iter(_tts_tasks)), None)
     _tts_tasks[task_id] = q
 
     def run():
@@ -1118,6 +1392,7 @@ def tts_single():
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
                 seed=tts_seed, temperature=tts_temp,
+                speed=tts_speed,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -1126,6 +1401,24 @@ def tts_single():
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify(task_id=task_id)
+
+
+def _parse_fps(raw):
+    """ffprobe отдаёт '30000/1001' или '0/0' — считаем без eval и без деления на ноль."""
+    if not raw:
+        return ""
+    raw = str(raw)
+    if "/" in raw:
+        num, _, den = raw.partition("/")
+        try:
+            num, den = float(num), float(den)
+        except ValueError:
+            return ""
+        return num / den if den else ""
+    try:
+        return float(raw)
+    except ValueError:
+        return ""
 
 
 @app.route("/video-info")
@@ -1154,7 +1447,7 @@ def video_info():
                     "codec": s.get("codec_name", ""),
                     "width": s.get("width", 0),
                     "height": s.get("height", 0),
-                    "fps": eval(s["r_frame_rate"]) if s.get("r_frame_rate") and "/" in str(s.get("r_frame_rate", "")) else s.get("r_frame_rate", ""),
+                    "fps": _parse_fps(s.get("r_frame_rate")),
                     "bitrate": round(int(s.get("bit_rate", 0)) / 1000) if s.get("bit_rate") else 0,
                 }
             elif s.get("codec_type") == "audio" and "audio" not in info:
@@ -1183,17 +1476,46 @@ def audio_waveform():
             "ffmpeg", "-i", path, "-ar", "8000", "-ac", "1",
             "-f", "s16le", "-acodec", "pcm_s16le", "-"
         ], stderr=_sp.DEVNULL)
-        samples = struct.unpack(f"<{len(raw)//2}h", raw)
-        # Reduce to ~800 peaks
-        n = len(samples)
+        n = len(raw) // 2
+        if n == 0:
+            return jsonify(peaks=[], duration=0.0)
         bucket = max(1, n // 800)
-        peaks = []
-        for i in range(0, n, bucket):
-            chunk = samples[i:i+bucket]
-            peaks.append(max(abs(s) for s in chunk) / 32768.0)
+        try:
+            # numpy считает пики на порядок быстрее: у часового аудио это
+            # 28 млн отсчётов, и чистый Python-цикл занимал бы секунды
+            import numpy as _np
+            # int32: abs(-32768) в int16 переполняется и даёт отрицательный пик
+            samples = _np.frombuffer(raw[:n * 2], dtype="<i2").astype(_np.int32)
+            trimmed = samples[:(n // bucket) * bucket].reshape(-1, bucket)
+            peaks = (_np.abs(trimmed).max(axis=1) / 32768.0).tolist()
+            if n % bucket:
+                peaks.append(float(_np.abs(samples[(n // bucket) * bucket:]).max()) / 32768.0)
+        except ImportError:
+            samples = struct.unpack(f"<{n}h", raw[:n * 2])
+            peaks = [max(abs(s) for s in samples[i:i + bucket]) / 32768.0
+                     for i in range(0, n, bucket)]
         return jsonify(peaks=peaks, duration=n / 8000.0)
     except Exception as e:
         return jsonify(error=str(e)), 500
+
+
+@app.route("/save-subs", methods=["POST"])
+def save_or_delete_subs():
+    """Delete subtitle files from project."""
+    data = request.json
+    work_dir = data.get("work_dir", "")
+    sub_type = data.get("type", "")  # "original" or "translated"
+    delete = data.get("delete", False)
+    if not work_dir or not sub_type:
+        return jsonify(error="Параметры обязательны"), 400
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR):
+        return jsonify(error="Недопустимый путь"), 403
+    if delete:
+        fname = "original.srt" if sub_type == "original" else "translated.srt"
+        fpath = os.path.join(work_dir, fname)
+        if os.path.exists(fpath):
+            os.remove(fpath)
+    return jsonify(ok=True)
 
 
 @app.route("/delete-output", methods=["POST"])
@@ -1203,9 +1525,7 @@ def delete_output():
     path = data.get("path", "")
     if not path or not os.path.exists(path):
         return jsonify(error="Файл не найден"), 404
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(path, DEFAULT_OUTPUT_DIR):
         return jsonify(error="Недопустимый путь"), 403
     os.remove(path)
     return jsonify(ok=True)
@@ -1235,12 +1555,28 @@ def delete_tts_segment():
     path = data.get("path", "")
     if not path or not os.path.exists(path):
         return jsonify(error="Файл не найден"), 404
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(path, DEFAULT_OUTPUT_DIR):
         return jsonify(error="Недопустимый путь"), 403
     os.remove(path)
     return jsonify(ok=True)
+
+
+@app.route("/project-audio")
+def serve_project_audio():
+    """Serve project audio file (no_vocals.wav, vocals.wav, etc.)."""
+    work_dir = request.args.get("work_dir", "")
+    name = request.args.get("name", "")
+    if not work_dir or not name:
+        return "Not found", 404
+    # Security: only allow known audio files
+    if name not in ("no_vocals.wav", "vocals.wav", "audio.wav"):
+        return "Forbidden", 403
+    path = os.path.join(work_dir, name)
+    if not os.path.exists(path):
+        return "Not found", 404
+    if not _is_within(path, DEFAULT_OUTPUT_DIR):
+        return "Forbidden", 403
+    return send_file(os.path.realpath(path), mimetype="audio/wav")
 
 
 @app.route("/tts-audio")
@@ -1249,11 +1585,9 @@ def serve_tts_audio():
     path = request.args.get("path", "")
     if not path or not os.path.exists(path):
         return "Not found", 404
-    real = os.path.realpath(path)
-    allowed = os.path.realpath(DEFAULT_OUTPUT_DIR)
-    if not real.startswith(allowed):
+    if not _is_within(path, DEFAULT_OUTPUT_DIR):
         return "Forbidden", 403
-    resp = send_file(real, mimetype="audio/wav")
+    resp = send_file(os.path.realpath(path), mimetype="audio/wav")
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -1301,10 +1635,14 @@ def get_settings():
 
 @app.route("/settings", methods=["POST"])
 def save_settings():
-    global ANTHROPIC_API_KEY, OPENAI_API_KEY, CUSTOM_API_KEY, CUSTOM_API_URL, HF_TOKEN
+    global ANTHROPIC_API_KEY, OPENAI_API_KEY, CUSTOM_API_KEY, CUSTOM_API_URL, HF_TOKEN, ELEVENLABS_API_KEY, FISH_API_KEY
     global OLLAMA_URL, TRANSLATE_PROVIDER, TRANSLATE_MODEL
     global DEFAULT_TRANSCRIBE_ENGINE, DEFAULT_WHISPER_MODEL
-    global DEFAULT_TTS_ENGINE, DEFAULT_TTS_VOICE, DEFAULT_TTS_SEED, DEFAULT_TTS_TEMPERATURE, DEFAULT_OUTPUT_DIR
+    global DEFAULT_TTS_ENGINE, DEFAULT_TTS_VOICE, DEFAULT_TTS_SEED, DEFAULT_TTS_TEMPERATURE, DEFAULT_TTS_SPEED, DEFAULT_OUTPUT_DIR
+    global DEFAULT_SEPARATE_VOCALS, DEFAULT_MERGE_SENTENCES, DEFAULT_BUILD_FORMAT, DEFAULT_BUILD_CODEC, DEFAULT_BUILD_PRESET
+    global DEFAULT_BUILD_AUDIO_BITRATE, DEFAULT_BUILD_MAX_SLOWDOWN, DEFAULT_BUILD_ORIGINAL_AUDIO
+    global DEFAULT_BUILD_ORIGINAL_VOLUME, DEFAULT_BUILD_NO_VOCALS_VOLUME, DEFAULT_BUILD_VOCALS_VOLUME
+    global DEFAULT_BUILD_BURN_SUBS
 
     data = request.json
     env = _read_env()
@@ -1316,16 +1654,20 @@ def save_settings():
         "custom_api_key":     "CUSTOM_API_KEY",
         "custom_api_url":     "CUSTOM_API_URL",
         "hf_token":           "HF_TOKEN",
+        "elevenlabs_api_key": "ELEVENLABS_API_KEY",
+        "fish_api_key":       "FISH_API_KEY",
         "ollama_url":         "OLLAMA_URL",
         "translate_provider": "TRANSLATE_PROVIDER",
         "translate_model":    "TRANSLATE_MODEL",
         "transcribe_engine":  "TRANSCRIBE_ENGINE",
         "whisper_model":      "WHISPER_MODEL",
         "separate_vocals":    "SEPARATE_VOCALS",
+        "merge_sentences":    "MERGE_SENTENCES",
         "tts_engine":         "TTS_ENGINE",
         "tts_voice":          "TTS_VOICE",
         "tts_seed":           "TTS_SEED",
         "tts_temperature":    "TTS_TEMPERATURE",
+        "tts_speed":          "TTS_SPEED",
         "output_dir":         "OUTPUT_DIR",
         "build_format":       "BUILD_FORMAT",
         "build_codec":        "BUILD_CODEC",
@@ -1361,6 +1703,12 @@ def save_settings():
     if "hf_token" in data:
         HF_TOKEN = data["hf_token"]
         os.environ["HF_TOKEN"] = HF_TOKEN
+    if "elevenlabs_api_key" in data:
+        ELEVENLABS_API_KEY = data["elevenlabs_api_key"]
+        os.environ["ELEVENLABS_API_KEY"] = ELEVENLABS_API_KEY
+    if "fish_api_key" in data:
+        FISH_API_KEY = data["fish_api_key"]
+        os.environ["FISH_API_KEY"] = FISH_API_KEY
     if "ollama_url" in data:
         OLLAMA_URL = data["ollama_url"]
     if "translate_provider" in data:
@@ -1379,8 +1727,35 @@ def save_settings():
         DEFAULT_TTS_SEED = int(data["tts_seed"])
     if "tts_temperature" in data:
         DEFAULT_TTS_TEMPERATURE = float(data["tts_temperature"])
+    if "tts_speed" in data:
+        DEFAULT_TTS_SPEED = float(data["tts_speed"])
     if "output_dir" in data:
         DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.expanduser(data["output_dir"]))
+    # Настройки сборки: без этого форма подхватывала их только после перезапуска
+    if "separate_vocals" in data:
+        DEFAULT_SEPARATE_VOCALS = str(data["separate_vocals"]).lower() == "true" if not isinstance(data["separate_vocals"], bool) else data["separate_vocals"]
+    if "merge_sentences" in data:
+        DEFAULT_MERGE_SENTENCES = data["merge_sentences"] if isinstance(data["merge_sentences"], bool) else str(data["merge_sentences"]).lower() == "true"
+    if "build_format" in data:
+        DEFAULT_BUILD_FORMAT = data["build_format"]
+    if "build_codec" in data:
+        DEFAULT_BUILD_CODEC = data["build_codec"]
+    if "build_preset" in data:
+        DEFAULT_BUILD_PRESET = data["build_preset"]
+    if "build_audio_bitrate" in data:
+        DEFAULT_BUILD_AUDIO_BITRATE = data["build_audio_bitrate"]
+    if "build_max_slowdown" in data:
+        DEFAULT_BUILD_MAX_SLOWDOWN = str(data["build_max_slowdown"])
+    if "build_original_audio" in data:
+        DEFAULT_BUILD_ORIGINAL_AUDIO = data["build_original_audio"]
+    if "build_original_volume" in data:
+        DEFAULT_BUILD_ORIGINAL_VOLUME = str(data["build_original_volume"])
+    if "build_no_vocals_volume" in data:
+        DEFAULT_BUILD_NO_VOCALS_VOLUME = str(data["build_no_vocals_volume"])
+    if "build_vocals_volume" in data:
+        DEFAULT_BUILD_VOCALS_VOLUME = str(data["build_vocals_volume"])
+    if "build_burn_subs" in data:
+        DEFAULT_BUILD_BURN_SUBS = bool(data["build_burn_subs"]) if isinstance(data["build_burn_subs"], bool) else str(data["build_burn_subs"]).lower() == "true"
 
     _write_env(env)
     return jsonify(ok=True)
@@ -1390,7 +1765,69 @@ def save_settings():
 
 
 def _emit(job: Job, event: str, **data):
-    job.messages.put({"event": event, "data": data})
+    with job.events_lock:
+        job.events.append({"event": event, "data": data})
+
+
+def _voice_signature(job: "Job") -> str:
+    """Отпечаток голоса: движок, голос, скорость, сид, карта спикеров.
+
+    Готовый seg_XXXX.wav не хранит, каким голосом озвучен, а движки пропускают
+    существующие файлы — без этой части отпечатка смена голоса оставляла бы
+    часть фраз звучать прежним.
+    """
+    import hashlib
+    parts = [job.tts_engine, job.tts_voice, job.tts_voice_wav,
+             f"{job.tts_speed}", f"{job.tts_seed}",
+             json_mod.dumps(job.speaker_voice_map or {}, sort_keys=True, ensure_ascii=False)]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _stale_tts_check(job: "Job", log):
+    """Отодвигает TTS-сегменты, озвученные под другую разбивку или другим голосом.
+
+    Движки пропускают уже существующие seg_XXXX.wav, поэтому после смены границ
+    или голоса новая фраза получила бы чужое старое аудио.
+    """
+    from pipeline import segments_signature
+    if job.skip_tts or not job.translated or not job.work_dir:
+        return
+    sig = segments_signature(job.translated)
+    vsig = _voice_signature(job)
+    meta_path = os.path.join(job.work_dir, "meta.json")
+    meta = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as mf:
+                meta = json_mod.loads(mf.read())
+        except Exception:
+            meta = {}
+    saved = meta.get("segments_signature")
+    saved_voice = meta.get("voice_signature")
+
+    tts_dir = os.path.join(job.work_dir, "tts_audio")
+    wavs = ([f for f in os.listdir(tts_dir) if f.endswith(".wav")]
+            if os.path.isdir(tts_dir) else [])
+    if wavs and (saved != sig or (saved_voice and saved_voice != vsig)):
+        # Без сохранённого отпечатка (проекты до этой версии) судим по счёту:
+        # столько же файлов, сколько фраз — считаем, что они от этой разбивки.
+        voice_changed = bool(saved_voice) and saved_voice != vsig
+        stale = voice_changed or bool(saved) or len(wavs) != len(job.translated)
+        if stale:
+            prev = os.path.join(job.work_dir, "tts_audio_prev")
+            shutil.rmtree(prev, ignore_errors=True)
+            shutil.move(tts_dir, prev)
+            reason = ("Сменился голос озвучки" if voice_changed else
+                      f"Разбивка субтитров изменилась ({len(wavs)} сегментов → "
+                      f"{len(job.translated)} фраз)")
+            log(f"🧹 {reason}: старая озвучка убрана в tts_audio_prev, "
+                "речь будет синтезирована заново")
+
+    # Отпечатки пишем всегда — иначе следующий запуск не увидит смены
+    meta["segments_signature"] = sig
+    meta["voice_signature"] = vsig
+    with open(meta_path, "w", encoding="utf-8") as mf:
+        mf.write(json_mod.dumps(meta, ensure_ascii=False, indent=2))
 
 
 def _run_pipeline(job: Job, api_key: str):
@@ -1449,7 +1886,9 @@ def _run_pipeline(job: Job, api_key: str):
             log(f"📁 Файл: {Path(video_path).name}")
             job.source_video = video_path
         _emit(job, "step", key="download", state="done")
-        _emit(job, "source_ready", path=job.source_video)
+        # work_dir нужен клиенту сразу: по нему подключаются фоновые дорожки и
+        # предпрослушивание готовых TTS-сегментов ещё до конца генерации
+        _emit(job, "source_ready", path=job.source_video, work_dir=job.work_dir)
 
         # ── Transcribe ──
         if job.skip_transcribe:
@@ -1496,6 +1935,9 @@ def _run_pipeline(job: Job, api_key: str):
             _emit(job, "original_ready")
 
         # ── Translate ──
+        # Есть ли настоящий результат перевода (а не копия оригинала) —
+        # только тогда шаг блокируется замком в UI
+        has_translation = True
         if job.skip_translate:
             _emit(job, "step", key="translate", state="done")
             log("⏭️ Перевод пропущен")
@@ -1509,6 +1951,7 @@ def _run_pipeline(job: Job, api_key: str):
                 elif job.subtitles:
                     # Use original as translated (user can edit)
                     job.translated = [s.copy() for s in job.subtitles]
+                    has_translation = False
                     log("📝 Используются оригинальные субтитры (можно отредактировать)")
         else:
             if not job.subtitles:
@@ -1525,11 +1968,38 @@ def _run_pipeline(job: Job, api_key: str):
             )
             _emit(job, "step", key="translate", state="done")
 
+        # ── Склейка в законченные фразы ──
+        # Транскрипция режет речь по дыханию: сегменты обрываются на полуслове,
+        # и синтез каждого куска отдельно даёт рваную интонацию. Собираем
+        # предложения целиком. При пропуске TTS не трогаем — иначе индексы
+        # разъедутся с уже готовыми seg_*.wav.
+        if job.merge_sentences and job.translated and not job.skip_tts:
+            from pipeline import merge_into_sentences
+            before = len(job.translated)
+            merged, merged_orig = merge_into_sentences(job.translated, job.subtitles or [])
+            if merged and len(merged) != before:
+                # исходную разбивку сохраняем рядом — вернуться можно всегда
+                for name, data in (("translated", job.translated), ("original", job.subtitles)):
+                    src = os.path.join(job.work_dir, f"{name}.srt")
+                    if data and os.path.exists(src):
+                        shutil.copy2(src, os.path.join(job.work_dir, f"{name}_raw.srt"))
+                job.translated = merged
+                if merged_orig:
+                    job.subtitles = merged_orig
+                    write_srt(job.subtitles, os.path.join(job.work_dir, "original.srt"))
+                write_srt(job.translated, os.path.join(job.work_dir, "translated.srt"))
+                log(f"🧩 Склеено в законченные фразы: {before} → {len(merged)} "
+                    f"(исходная разбивка сохранена в translated_raw.srt)")
+                _emit(job, "original_ready")
+
         # Show subtitles on screen
         if job.translated:
-            _emit(job, "subtitles_ready")
+            _emit(job, "subtitles_ready", translated=has_translation)
         else:
             raise Exception("Нет субтитров для синтеза речи")
+
+        # Разбивка изменилась — готовые сегменты озвучены под старые границы
+        _stale_tts_check(job, log)
 
         # ── TTS ──
         if job.skip_tts:
@@ -1553,7 +2023,7 @@ def _run_pipeline(job: Job, api_key: str):
         else:
             _emit(job, "step", key="tts", state="active")
             def _on_tts_segment(index):
-                _emit(job, "tts_segment", index=index)
+                _emit(job, "tts_segment", index=index, work_dir=job.work_dir)
 
             subs_with_audio = synthesize_speech(
                 job.translated, job.work_dir, log,
@@ -1563,6 +2033,7 @@ def _run_pipeline(job: Job, api_key: str):
                 voice_text=job.tts_voice_text,
                 seed=job.tts_seed,
                 temperature=job.tts_temperature,
+                speed=job.tts_speed,
                 speaker_voice_map=job.speaker_voice_map,
                 on_segment=_on_tts_segment,
             )
@@ -1619,6 +2090,30 @@ def _run_pipeline(job: Job, api_key: str):
             )
             _emit(job, "step", key="build", state="done")
 
+        # ── Lip Sync ──
+        if job.lipsync_enabled and job.lipsync_engine and job.result_path and os.path.exists(job.result_path):
+            _emit(job, "step", key="lipsync", state="active")
+            # splitext, а не replace: для .mkv/.webm replace ничего не менял и
+            # плагин писал в тот же файл, который читает
+            _lp_base, _lp_ext = os.path.splitext(job.result_path)
+            lipsync_out = f"{_lp_base}_lipsync{_lp_ext or '.mp4'}"
+            # Extract audio from built video for lip sync
+            built_audio = os.path.join(job.work_dir, "_built_audio.wav")
+            import subprocess as _lsp
+            _lsp.run(["ffmpeg", "-y", "-i", job.result_path, "-vn", "-ar", "16000", "-ac", "1", built_audio],
+                     capture_output=True)
+            lipsync_video(
+                job.result_path, built_audio, lipsync_out, log,
+                engine=job.lipsync_engine,
+            )
+            # Replace original with lip-synced version
+            if os.path.exists(lipsync_out):
+                os.replace(lipsync_out, job.result_path)
+                log("✅ Lip sync применён к финальному видео")
+            if os.path.exists(built_audio):
+                os.remove(built_audio)
+            _emit(job, "step", key="lipsync", state="done")
+
         job.state = "done"
         _emit(job, "done", path=job.result_path or job.work_dir)
 
@@ -1635,14 +2130,27 @@ def main():
 
     from gevent.pywsgi import WSGIServer
 
-    port = int(os.environ.get("PORT", 5000))
+    import socket
+
+    port = int(os.environ.get("PORT", 5050))
     host = os.environ.get("HOST", "0.0.0.0")
-    print(f"Serving on http://{host}:{port}")
+    print(f"\n  Video Dub запущен:\n")
+    print(f"  Локально:  http://127.0.0.1:{port}")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        print(f"  В сети:    http://{local_ip}:{port}")
+    except Exception:
+        pass
+    print(f"\n  Откройте ссылку в браузере. Ctrl+C для остановки.\n")
     server = WSGIServer((host, port), app)
 
     def shutdown(*_):
         print("\nОстановка...")
         server.stop()
+        server.close()
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)

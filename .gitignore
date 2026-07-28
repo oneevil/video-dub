@@ -2,7 +2,10 @@
 .env
 __pycache__/
 *.pyc
+.latentsync/
 .venv/
-.venv-omnivoice/
+.venv-*/
 models/
 projects/
+voices/**/.elevenlabs_clone_*.json
+voices/**/.fish_clone_*.json
