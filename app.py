@@ -199,6 +199,8 @@ class Job:
         self.result_path: str | None = None
         self.project_name = ""
         self.state = "starting"
+        self.stage = ""              # что выполняется прямо сейчас
+        self.cancel_scope = None     # pipeline.CancelScope, ставится при старте
         self.resume_event = threading.Event()
         # Skip flags
         self.skip_transcribe = False
@@ -517,6 +519,22 @@ def progress(job_id: str):
                 break
 
     return Response(stream(), mimetype="text/event-stream")
+
+
+@app.route("/stop/<job_id>", methods=["POST"])
+def stop_job(job_id: str):
+    """Принудительно останавливает текущий этап задания."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify(error="Job не найден"), 404
+    if job.state in ("done", "error", "cancelled"):
+        return jsonify(ok=True, already_finished=True)
+    scope = job.cancel_scope
+    killed = scope.cancel() if scope else 0
+    job.state = "cancelling"
+    _emit(job, "log", message=f"⏹️ Остановка: {STAGE_NAMES.get(job.stage, job.stage or 'обработка')}"
+                              + (f" (процессов остановлено: {killed})" if killed else ""))
+    return jsonify(ok=True, stage=job.stage, killed=killed)
 
 
 @app.route("/subtitles/<job_id>")
@@ -1764,6 +1782,22 @@ def save_settings():
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 
 
+STAGE_NAMES = {
+    "download": "скачивание",
+    "transcribe": "транскрипция",
+    "translate": "перевод",
+    "tts": "синтез речи",
+    "build": "сборка видео",
+    "lipsync": "синхронизация губ",
+}
+
+
+def _set_stage(job: "Job", stage: str, state: str = "active"):
+    """Отмечает текущий этап: по нему кнопка «Стоп» знает, что прерывает."""
+    job.stage = stage
+    _emit(job, "step", key=stage, state=state)
+
+
 def _emit(job: Job, event: str, **data):
     with job.events_lock:
         job.events.append({"event": event, "data": data})
@@ -1830,7 +1864,19 @@ def _stale_tts_check(job: "Job", log):
         mf.write(json_mod.dumps(meta, ensure_ascii=False, indent=2))
 
 
+def _emit_cancelled(job: "Job"):
+    job.state = "cancelled"
+    stage = STAGE_NAMES.get(job.stage, job.stage or "обработка")
+    if job.stage:
+        _emit(job, "step", key=job.stage, state="")
+    _emit(job, "cancelled", stage=job.stage,
+          message=f"⏹️ Остановлено пользователем ({stage})")
+
+
 def _run_pipeline(job: Job, api_key: str):
+    from pipeline import CancelScope, Cancelled, set_cancel_scope, check_cancelled
+    job.cancel_scope = CancelScope()
+    set_cancel_scope(job.cancel_scope)
     try:
         os.makedirs(job.output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1864,7 +1910,7 @@ def _run_pipeline(job: Job, api_key: str):
         check_dependencies(log)
 
         # ── Download ──
-        _emit(job, "step", key="download", state="active")
+        _set_stage(job, "download")
         url = job.url
         # Check if source already exists in work_dir (resume)
         existing_source = None
@@ -1904,7 +1950,7 @@ def _run_pipeline(job: Job, api_key: str):
         else:
             if not job.source_video:
                 raise Exception("Нет исходного видео для транскрипции")
-            _emit(job, "step", key="transcribe", state="active")
+            _set_stage(job, "transcribe")
             audio_path = extract_audio(job.source_video, job.work_dir, log)
             transcribe_path = audio_path
             # Optionally separate vocals from background
@@ -1915,6 +1961,7 @@ def _run_pipeline(job: Job, api_key: str):
             # For whisper-api, need OpenAI key
             _transcribe_key = OPENAI_API_KEY if job.transcribe_engine == "whisper-api" else ""
             def _on_transcribe_segment(sub):
+                check_cancelled()
                 _emit(job, "sub_add", sub=sub, mode="original")
 
             job.subtitles = transcribe_audio(
@@ -1956,8 +2003,9 @@ def _run_pipeline(job: Job, api_key: str):
         else:
             if not job.subtitles:
                 raise Exception("Нет субтитров для перевода")
-            _emit(job, "step", key="translate", state="active")
+            _set_stage(job, "translate")
             def _on_translate_chunk(subs):
+                check_cancelled()
                 _emit(job, "sub_add", subs=subs, mode="translated")
 
             job.translated = translate_subtitles(
@@ -2021,8 +2069,9 @@ def _run_pipeline(job: Job, api_key: str):
                 log(f"⚠️ {missing} сегментов без TTS — будут пропущены при сборке")
             log(f"🔊 Загружены {len(subs_with_audio)} TTS-файлов")
         else:
-            _emit(job, "step", key="tts", state="active")
+            _set_stage(job, "tts")
             def _on_tts_segment(index):
+                check_cancelled()
                 _emit(job, "tts_segment", index=index, work_dir=job.work_dir)
 
             subs_with_audio = synthesize_speech(
@@ -2044,6 +2093,8 @@ def _run_pipeline(job: Job, api_key: str):
 
         # ── Separate vocals for build if needed ──
         if job.build_original_audio in ("no_vocals", "voiceover"):
+            # помечаем этап, иначе кнопка «Стоп» покажет предыдущий шаг
+            job.stage = "build"
             no_vocals = os.path.join(job.work_dir, "no_vocals.wav")
             if not os.path.exists(no_vocals):
                 audio_full = os.path.join(job.work_dir, "audio.wav")
@@ -2059,7 +2110,7 @@ def _run_pipeline(job: Job, api_key: str):
         else:
             if not job.source_video:
                 raise Exception("Нет исходного видео для сборки")
-            _emit(job, "step", key="build", state="active")
+            _set_stage(job, "build")
             ext = job.build_format
             out_name = f"output.{ext}"
             job.result_path = os.path.join(job.work_dir, out_name)
@@ -2093,7 +2144,7 @@ def _run_pipeline(job: Job, api_key: str):
 
         # ── Lip Sync ──
         if job.lipsync_enabled and job.lipsync_engine and job.result_path and os.path.exists(job.result_path):
-            _emit(job, "step", key="lipsync", state="active")
+            _set_stage(job, "lipsync")
             # splitext, а не replace: для .mkv/.webm replace ничего не менял и
             # плагин писал в тот же файл, который читает
             _lp_base, _lp_ext = os.path.splitext(job.result_path)
@@ -2118,9 +2169,18 @@ def _run_pipeline(job: Job, api_key: str):
         job.state = "done"
         _emit(job, "done", path=job.result_path or job.work_dir)
 
+    except Cancelled:
+        _emit_cancelled(job)
     except Exception as e:
-        job.state = "error"
-        _emit(job, "error", message=str(e))
+        # Убитый нами процесс роняет плагин обычным исключением — это не сбой,
+        # а результат нажатия «Стоп»
+        if job.cancel_scope is not None and job.cancel_scope.cancelled:
+            _emit_cancelled(job)
+        else:
+            job.state = "error"
+            _emit(job, "error", message=str(e))
+    finally:
+        set_cancel_scope(None)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

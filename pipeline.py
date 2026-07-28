@@ -92,6 +92,120 @@ def safe_cwd() -> str:
     return tempfile.gettempdir()
 
 
+# ── Принудительная остановка ──────────────────────────────────────────────────
+# Останов между этапами недостаточен: ffmpeg, demucs, yt-dlp и TTS-воркеры живут
+# минутами. Регистрируем все дочерние процессы и по команде убиваем их.
+
+class Cancelled(Exception):
+    """Работа прервана пользователем."""
+
+
+class CancelScope:
+    def __init__(self):
+        import threading as _th
+        self._event = _th.Event()
+        self._procs = set()
+        self._lock = _th.Lock()
+
+    def register(self, proc):
+        with self._lock:
+            if self._event.is_set():
+                _terminate(proc)          # отмена пришла, пока процесс стартовал
+                raise Cancelled()
+            self._procs.add(proc)
+
+    def unregister(self, proc):
+        with self._lock:
+            self._procs.discard(proc)
+
+    def cancel(self):
+        self._event.set()
+        with self._lock:
+            procs = list(self._procs)
+            self._procs.clear()
+        for p in procs:
+            _terminate(p)
+        return len(procs)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def check(self):
+        if self._event.is_set():
+            raise Cancelled()
+
+
+def _terminate(proc):
+    """Мягко, затем жёстко — и то и другое работает на Windows."""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+    except Exception:
+        pass
+
+
+_current_scope: "CancelScope | None" = None
+
+
+def set_cancel_scope(scope):
+    global _current_scope
+    _current_scope = scope
+
+
+def current_scope():
+    return _current_scope
+
+
+def check_cancelled():
+    if _current_scope is not None:
+        _current_scope.check()
+
+
+def run(cmd, **kwargs):
+    """subprocess.run с регистрацией процесса — чтобы его можно было убить.
+
+    Все внешние вызовы (ffmpeg, ffprobe, yt-dlp) идут через неё, иначе кнопка
+    «Стоп» ждала бы окончания текущей операции.
+    """
+    check_cancelled()
+    capture = kwargs.pop("capture_output", False)
+    timeout = kwargs.pop("timeout", None)
+    check = kwargs.pop("check", False)
+    if capture:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    proc = subprocess.Popen(cmd, **kwargs)
+    scope = _current_scope
+    if scope is not None:
+        scope.register(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        _terminate(proc)
+        raise
+    finally:
+        if scope is not None:
+            scope.unregister(proc)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    if scope is not None and scope.cancelled:
+        raise Cancelled()
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return result
+
+
+def register_proc(proc):
+    """Регистрирует внешне созданный процесс (TTS-воркеры, транскрипция)."""
+    if _current_scope is not None:
+        _current_scope.register(proc)
+    return proc
+
+
 def drain_stderr(proc, maxlines: int = 200):
     """Фоново вычитывает stderr процесса, возвращает deque с хвостом вывода.
 
@@ -422,7 +536,7 @@ def download_video(url: str, out_dir: str, log) -> str:
         "-o", out_template,
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"yt-dlp ошибка:\n{result.stderr}")
     # Найти скачанный файл
@@ -445,7 +559,7 @@ def extract_audio(video_path: str, out_dir: str, log) -> str:
         "-map", "0:a:0",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"ffmpeg (audio) ошибка:\n{result.stderr}")
     log("✅ Аудио извлечено")
@@ -463,9 +577,9 @@ def _setup_demucs_venv(log):
         return
     import sys as _sys
     log("   📦 Создаю окружение demucs...")
-    subprocess.run([_sys.executable, "-m", "venv", DEMUCS_VENV], check=True)
+    run([_sys.executable, "-m", "venv", DEMUCS_VENV], check=True)
     log("   📦 Устанавливаю зависимости...")
-    result = subprocess.run(
+    result = run(
         [os.path.join(DEMUCS_VENV, _VENV_BIN, "pip"), "install", "--quiet"] + _torch_index_args() + _DEMUCS_DEPS,
         capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
@@ -491,7 +605,7 @@ def separate_vocals(audio_path: str, out_dir: str, log) -> tuple[str, str]:
     python = os.path.join(DEMUCS_VENV, _VENV_BIN, "python")
 
     # Detect GPU for demucs
-    device_check = subprocess.run(
+    device_check = run(
         [python, "-c", "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'))"],
         capture_output=True, text=True, encoding="utf-8")
     device = device_check.stdout.strip() if device_check.returncode == 0 else "cpu"
@@ -505,7 +619,7 @@ def separate_vocals(audio_path: str, out_dir: str, log) -> tuple[str, str]:
         "--filename", "{stem}.{ext}",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"demucs ошибка:\n{result.stderr}")
 
@@ -625,6 +739,7 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
                        language: str = "",
                        on_segment=None) -> list[dict]:
     """Синтезирует речь через выбранный движок (plugin system)."""
+    check_cancelled()
     if speaker_voice_map:
         results = _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed, temperature,
                                      on_segment=on_segment, default_engine=engine, default_voice=voice,
@@ -644,7 +759,6 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
 
 def _apply_tts_speed(results: list[dict], speed: float, log):
     """Change playback speed of generated TTS audio files via ffmpeg atempo."""
-    import subprocess
     from concurrent.futures import ThreadPoolExecutor
     import threading as _th
     counter = [0]
@@ -667,7 +781,7 @@ def _apply_tts_speed(results: list[dict], speed: float, log):
         filters.append(f"atempo={s:.4f}")
         cmd = ["ffmpeg", "-y", "-i", path, "-af", ",".join(filters), "-ar", "24000", tmp]
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            result = run(cmd, capture_output=True, timeout=120)
             if result.returncode == 0 and os.path.exists(tmp):
                 # На Windows замена падает, если файл открыт (например, плеером)
                 try:
@@ -768,7 +882,7 @@ def get_audio_duration(audio_path: str) -> float:
         "-show_streams",
         audio_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = run(cmd, capture_output=True, text=True, encoding="utf-8")
     data = json.loads(result.stdout)
     for stream in data.get("streams", []):
         if "duration" in stream:
@@ -811,7 +925,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
 
     # Get total video duration
     probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video_path]
-    probe_r = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8")
+    probe_r = run(probe_cmd, capture_output=True, text=True, encoding="utf-8")
     video_duration = float(json.loads(probe_r.stdout).get("format", {}).get("duration", 0))
 
     v_codec = codec if codec != "copy" else "libx264"
@@ -866,6 +980,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
     total = len(timeline)
 
     def _render_segment(i, item):
+        check_cancelled()
         seg_type, seg_start, seg_dur, sub, speed_factor = item
         v_seg = os.path.join(tmp_dir, f"v_{i:04d}.mp4")
         a_seg = os.path.join(tmp_dir, f"a_{i:04d}.wav")
@@ -879,7 +994,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 "-c:v", v_codec, "-preset", preset,
                 "-an", v_seg
             ]
-            subprocess.run(cmd_v, capture_output=True)
+            run(cmd_v, capture_output=True)
             # Gap audio depends on original_audio_mode
             if original_audio_mode in ("no_vocals", "voiceover"):
                 bg_file = os.path.join(out_dir, "no_vocals.wav")
@@ -889,15 +1004,15 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                         # Voiceover gap: bg (no_vocals_volume) + vocals (vocals_volume)
                         bg_tmp_g = os.path.join(tmp_dir, f"gbg_{i:04d}.wav")
                         voc_tmp_g = os.path.join(tmp_dir, f"gvoc_{i:04d}.wav")
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", bg_file, "-ar", "44100", "-ac", "2", bg_tmp_g
                         ], capture_output=True)
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", vocals_file, "-ar", "44100", "-ac", "2", voc_tmp_g
                         ], capture_output=True)
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-i", bg_tmp_g, "-i", voc_tmp_g,
                             "-filter_complex",
                             f"[0:a]volume={no_vocals_volume:.2f}[bg];[1:a]volume={vocals_volume:.2f}[voc];[bg][voc]amix=inputs=2:duration=first[out]",
@@ -905,7 +1020,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                         ], capture_output=True)
                     else:
                         # no_vocals mode: bg at no_vocals_volume
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y",
                             "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", bg_file,
@@ -919,10 +1034,10 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                         "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo",
                         "-t", str(seg_dur), a_seg
                     ]
-                    subprocess.run(cmd_a, capture_output=True)
+                    run(cmd_a, capture_output=True)
             elif original_audio_mode == "full":
                 # Full audio at original_audio_volume
-                subprocess.run([
+                run([
                     "ffmpeg", "-y",
                     "-ss", str(seg_start), "-t", str(seg_dur),
                     "-i", video_path,
@@ -936,7 +1051,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-t", str(seg_dur), a_seg
                 ]
-                subprocess.run(cmd_a, capture_output=True)
+                run(cmd_a, capture_output=True)
         else:
             # TTS segment — possibly slowed down
             vf = f"setpts={speed_factor:.4f}*PTS"
@@ -948,7 +1063,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 "-c:v", v_codec, "-preset", preset,
                 "-an", v_seg
             ]
-            subprocess.run(cmd_v, capture_output=True)
+            run(cmd_v, capture_output=True)
 
             # TTS audio padded/trimmed to match slowed video duration
             target_dur = seg_dur * speed_factor
@@ -961,7 +1076,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 "-ar", "44100", "-ac", "2",
                 tts_tmp
             ]
-            subprocess.run(cmd_a, capture_output=True)
+            run(cmd_a, capture_output=True)
 
             # Mix TTS with background audio if requested
             if original_audio_mode in ("full", "no_vocals", "voiceover"):
@@ -978,12 +1093,12 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                     bg_tmp = os.path.join(tmp_dir, f"bg_{i:04d}.wav")
                     # Extract background for this time range (original timing, not slowed)
                     if bg_src == video_path:
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", bg_src, "-vn", "-ar", "44100", "-ac", "2", bg_tmp
                         ], capture_output=True)
                     else:
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-ss", str(seg_start), "-t", str(seg_dur),
                             "-i", bg_src, "-ar", "44100", "-ac", "2", bg_tmp
                         ], capture_output=True)
@@ -997,7 +1112,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                             f1 = max(0.5, atempo * 2)
                             f2 = atempo / f1
                             af_bg = f"atempo={f1:.4f},atempo={f2:.4f}"
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-i", bg_tmp,
                             "-af", af_bg, "-ar", "44100", "-ac", "2", bg_stretched
                         ], capture_output=True)
@@ -1008,18 +1123,18 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                         vocals_file = os.path.join(out_dir, "vocals.wav")
                         if os.path.exists(vocals_file):
                             voc_tmp = os.path.join(tmp_dir, f"voc_{i:04d}.wav")
-                            subprocess.run([
+                            run([
                                 "ffmpeg", "-y", "-ss", str(seg_start), "-t", str(seg_dur),
                                 "-i", vocals_file, "-ar", "44100", "-ac", "2", voc_tmp
                             ], capture_output=True)
                             if speed_factor > 1.0:
                                 voc_stretched = os.path.join(tmp_dir, f"vocs_{i:04d}.wav")
-                                subprocess.run([
+                                run([
                                     "ffmpeg", "-y", "-i", voc_tmp,
                                     "-af", af_bg, "-ar", "44100", "-ac", "2", voc_stretched
                                 ], capture_output=True)
                                 os.replace(voc_stretched, voc_tmp)
-                            subprocess.run([
+                            run([
                                 "ffmpeg", "-y", "-i", tts_tmp, "-i", bg_tmp, "-i", voc_tmp,
                                 "-filter_complex",
                                 f"[0:a]volume=1.0[tts];[1:a]volume={vol:.2f}[bg];[2:a]volume={vocals_volume:.2f}[voc];"
@@ -1028,7 +1143,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                             ], capture_output=True)
                         else:
                             # No vocals file — fallback to 2-track
-                            subprocess.run([
+                            run([
                                 "ffmpeg", "-y", "-i", tts_tmp, "-i", bg_tmp,
                                 "-filter_complex",
                                 f"[0:a]volume=1.0[tts];[1:a]volume={vol:.2f}[bg];[tts][bg]amix=inputs=2:duration=first[out]",
@@ -1036,7 +1151,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                             ], capture_output=True)
                     else:
                         # 2-track mix: TTS + background
-                        subprocess.run([
+                        run([
                             "ffmpeg", "-y", "-i", tts_tmp, "-i", bg_tmp,
                             "-filter_complex",
                             f"[0:a]volume=1.0[tts];[1:a]volume={vol:.2f}[bg];[tts][bg]amix=inputs=2:duration=first[out]",
@@ -1099,7 +1214,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
                 af_parts.append(f"afade=t=in:st=0:d={fd:.3f}")
             if af_parts:
                 faded = a_seg + ".faded.wav"
-                subprocess.run([
+                run([
                     "ffmpeg", "-y", "-i", a_seg,
                     "-af", ",".join(af_parts),
                     "-ar", "44100", "-ac", "2", faded
@@ -1126,12 +1241,12 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
     v_concat = os.path.join(tmp_dir, "video_concat.mp4")
     a_concat = os.path.join(tmp_dir, "audio_concat.wav")
 
-    subprocess.run([
+    run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", v_list, "-c", "copy", v_concat
     ], capture_output=True)
 
-    subprocess.run([
+    run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", a_list, "-c", "copy", a_concat
     ], capture_output=True)
@@ -1158,7 +1273,7 @@ def build_final_video(video_path: str, subtitles_with_audio: list[dict],
         "-shortest",
         out_path
     ]
-    result = subprocess.run(cmd_final, capture_output=True, text=True, encoding="utf-8")
+    result = run(cmd_final, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         raise ProcessingError(f"ffmpeg (финал) ошибка:\n{result.stderr}")
 

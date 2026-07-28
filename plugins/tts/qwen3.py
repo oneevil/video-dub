@@ -127,8 +127,9 @@ def _get_worker(log):
         text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd()
     )
     # stderr обязательно вычитывать, иначе воркер зависнет на заполненной трубе
-    from pipeline import drain_stderr
+    from pipeline import drain_stderr, register_proc
     _qwen3_proc._err_tail = drain_stderr(_qwen3_proc)
+    register_proc(_qwen3_proc)   # чтобы кнопка «Стоп» могла его убить
 
     # Wait for ready
     for line in _qwen3_proc.stdout:

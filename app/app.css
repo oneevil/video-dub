@@ -392,6 +392,14 @@ html.light .resume-item:hover { background: rgba(0,0,0,.04); }
 .btn-start:active { transform: translateY(0); }
 .btn-start:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
 
+.btn-stop {
+  background: linear-gradient(135deg, #b91c1c, #ef4444); color: #fff;
+  box-shadow: 0 2px 8px rgba(239,68,68,.3); margin-top: 16px;
+}
+.btn-stop:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(239,68,68,.4); }
+.btn-stop:active { transform: translateY(0); }
+.btn-stop:disabled { opacity: .5; cursor: progress; transform: none; box-shadow: none; }
+
 /* ── Log (bottom panel) ──────────────────────────── */
 .log-resize-handle {
   height: 6px; cursor: row-resize; flex-shrink: 0;

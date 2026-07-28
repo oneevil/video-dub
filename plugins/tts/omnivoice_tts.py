@@ -83,7 +83,7 @@ def _start_readers(proc):
     """
     import queue as _q
     import threading as _th
-    from pipeline import drain_stderr
+    from pipeline import drain_stderr, register_proc
 
     proc._err_tail = drain_stderr(proc)
     out_q: "_q.Queue" = _q.Queue()
@@ -151,6 +151,8 @@ def _get_omnivoice_worker(log):
         env={**os.environ, "HF_HOME": cache_dir},
     )
     _start_readers(_omnivoice_proc)
+    from pipeline import register_proc
+    register_proc(_omnivoice_proc)   # чтобы кнопка «Стоп» могла его убить
 
     # Ждём "ready" (первая загрузка модели на MPS занимает несколько минут)
     while True:

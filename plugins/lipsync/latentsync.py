@@ -247,6 +247,8 @@ def process(video_path: str, audio_path: str, out_path: str, log,
     # здесь читают stderr, значит вычитывать в фоне надо stdout — иначе
     # переполнится он и процесс встанет
     import threading as _th
+    from pipeline import register_proc
+    register_proc(proc)   # для принудительной остановки
     _th.Thread(target=lambda: [None for _ in proc.stdout], daemon=True).start()
 
     # Read stderr for progress

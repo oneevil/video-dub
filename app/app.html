@@ -249,9 +249,10 @@
         </div>
       </div>
 
-      <button class="btn btn-start" id="btnStart" onclick="startJob()">
+      <!-- Одна кнопка на два состояния: «Начать» → «Остановить <этап>» -->
+      <button class="btn btn-start" id="btnStart" onclick="onMainButton()">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        Начать
+        <span id="btnStartLabel">Начать</span>
       </button>
       </div>
     </div>

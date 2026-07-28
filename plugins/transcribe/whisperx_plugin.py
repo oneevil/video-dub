@@ -206,8 +206,9 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
         cmd += ["--hf_token", hf_token]
 
     proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd())
-    from pipeline import drain_stderr
+    from pipeline import drain_stderr, register_proc
     err_tail = drain_stderr(proc)
+    register_proc(proc)   # для принудительной остановки
 
     subtitles = None
     for line in proc.stdout:

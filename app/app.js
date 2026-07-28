@@ -54,6 +54,16 @@ let currentJobId = null;
 let videoEl = null;
 let subtitles = [];
 let syncInterval = null;
+const STAGE_LABELS = {
+  download: 'скачивание', transcribe: 'транскрипцию', translate: 'перевод',
+  tts: 'синтез речи', build: 'сборку', lipsync: 'синхронизацию губ',
+};
+let currentStage = '';
+
+const _ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+const _ICON_STOP = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+let jobRunning = false;
+
 let uploadedOriginal = null;
 let uploadedTranslated = null;
 // Есть ли настоящий перевод. Пока его нет, subtitles — это оригиналы, и
@@ -987,6 +997,7 @@ function closeProject() {
   document.querySelectorAll('.step').forEach(s => s.className = 'step');
   document.querySelectorAll('.resume-item').forEach(e => e.style.background = '');
   document.getElementById('btnCloseProject').style.display = 'none';
+  _setRunningUI(false);
   document.getElementById('sourceSection').style.display = '';
   speakerMap = {};
   speakerVoiceMap = {};
@@ -1196,6 +1207,8 @@ function deleteTransSubs() {
 }
 
 function updateStartBtn() {
+  // пока идёт обработка, кнопка работает как «Остановить» — не блокируем её
+  if (jobRunning) return;
   const any = ['doTranscribe','doTranslate','doTts','doBuild'].some(id => {
     const chk = document.getElementById(id);
     return chk && chk.checked && !chk.disabled;
@@ -1203,6 +1216,46 @@ function updateStartBtn() {
   document.getElementById('btnStart').disabled = !any;
 }
 updateStartBtn();
+
+
+/* Одна и та же кнопка: пока идёт обработка — «Остановить <этап>» */
+function _setRunningUI(running, stage) {
+  const btn = document.getElementById('btnStart');
+  if (!btn) return;
+  jobRunning = running;
+  const label = document.getElementById('btnStartLabel');
+  if (running) {
+    btn.classList.remove('btn-start');
+    btn.classList.add('btn-stop');
+    btn.disabled = false;
+    btn.innerHTML = _ICON_STOP + '<span id="btnStartLabel">Остановить' +
+      (STAGE_LABELS[stage] ? ' ' + STAGE_LABELS[stage] : '') + '</span>';
+  } else {
+    btn.classList.remove('btn-stop');
+    btn.classList.add('btn-start');
+    btn.innerHTML = _ICON_PLAY + '<span id="btnStartLabel">Начать</span>';
+    updateStartBtn();
+  }
+  if (label && !running) label.textContent = 'Начать';
+}
+
+function onMainButton() {
+  if (jobRunning) stopJob();
+  else startJob();
+}
+
+function stopJob() {
+  if (!currentJobId) return;
+  const btn = document.getElementById('btnStart');
+  const label = document.getElementById('btnStartLabel');
+  if (btn) btn.disabled = true;
+  if (label) label.textContent = 'Останавливаю...';
+  addLog('⏹️ Останавливаю ' + (STAGE_LABELS[currentStage] || 'обработку') + '...');
+  fetch('/stop/' + currentJobId, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => { if (d.error) { addLog('❌ ' + d.error, 'error'); _setRunningUI(true, currentStage); } })
+    .catch(e => { addLog('❌ Не удалось остановить: ' + e, 'error'); _setRunningUI(true, currentStage); });
+}
 
 function startJob() {
   const url = document.getElementById('url').value.trim();
@@ -1293,10 +1346,11 @@ function startJob() {
   .then(data => {
     if (data.error) {
       addLog(data.error, 'error');
-      document.getElementById('btnStart').disabled = false;
+      _setRunningUI(false);
       return;
     }
     currentJobId = data.job_id;
+    _setRunningUI(true, '');
     document.getElementById('btnCloseProject').style.display = '';
     addLog('⚡ Запущен процесс: ' + data.job_id);
     loadPastJobs();
@@ -1304,7 +1358,7 @@ function startJob() {
   })
   .catch(e => {
     addLog('❌ Ошибка: ' + e, 'error');
-    document.getElementById('btnStart').disabled = false;
+    _setRunningUI(false);
   });
 }
 
@@ -1320,6 +1374,16 @@ function listenProgress(jobId) {
   es.addEventListener('step', e => {
     const d = JSON.parse(e.data);
     setStep(d.key, d.state);
+    if (d.state === 'active') { currentStage = d.key; _setRunningUI(true, d.key); }
+  });
+
+  es.addEventListener('cancelled', e => {
+    const d = JSON.parse(e.data);
+    addLog(d.message || '⏹️ Остановлено');
+    if (d.stage) setStep(d.stage, '');
+    _setRunningUI(false);
+    currentStage = '';
+    es.close();
   });
 
   es.addEventListener('source_ready', e => {
@@ -1417,7 +1481,8 @@ function listenProgress(jobId) {
   es.addEventListener('done', e => {
     const d = JSON.parse(e.data);
     addLog('🎉 Готово! ' + d.path);
-    document.getElementById('btnStart').disabled = false;
+    _setRunningUI(false);
+    currentStage = '';
     // Update output path and rebuild player buttons without resetting video
     outputVideoPath = d.path || null;
     _rebuildPlayerButtons();
@@ -1426,7 +1491,8 @@ function listenProgress(jobId) {
 
   es.addEventListener('error', e => {
     try { addLog(JSON.parse(e.data).message, 'error'); } catch (_) {}
-    document.getElementById('btnStart').disabled = false;
+    _setRunningUI(false);
+    currentStage = '';
     es.close();
   });
 
