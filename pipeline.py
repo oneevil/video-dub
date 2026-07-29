@@ -70,6 +70,32 @@ def _safe_remove(path: str):
         pass
 
 
+def dir_size(path: str) -> int:
+    """Размер каталога в байтах без двойного счёта.
+
+    В кэше HuggingFace snapshots/ — это симлинки на blobs/, а getsize идёт по
+    ссылке и считает файл дважды (модель на 1.5 ГБ показывалась как 3 ГБ).
+    """
+    import stat as _stat
+    total, seen = 0, set()
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            fp = os.path.join(root, name)
+            try:
+                st = os.lstat(fp)          # lstat: не идём по симлинку
+            except OSError:
+                continue
+            if _stat.S_ISLNK(st.st_mode):
+                continue                    # цель уже посчитана в blobs/
+            if st.st_nlink > 1:             # хардлинки — только один раз
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+            total += st.st_size
+    return total
+
+
 def rmtree_safe(path: str):
     """rmtree, устойчивый к read-only файлам Windows."""
     def _on_error(func, p, _exc):

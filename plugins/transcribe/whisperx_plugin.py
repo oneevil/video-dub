@@ -161,10 +161,8 @@ def list_downloaded_models():
         dp = os.path.join(cache_dir, d)
         if os.path.isdir(dp) and d.startswith("models--") and ".lock" not in d:
             model_name = d.replace("models--", "").replace("--", "/")
-            total = sum(
-                os.path.getsize(os.path.join(root, f))
-                for root, _, files in os.walk(dp) for f in files
-            )
+            from pipeline import dir_size
+            total = dir_size(dp)
             size_mb = total / 1024 / 1024
             result.append({
                 "name": model_name,

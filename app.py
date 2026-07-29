@@ -1207,7 +1207,7 @@ def _classify_hf_model(name: str):
 @app.route("/downloaded-models")
 def list_downloaded_models():
     """List downloaded models, filterable by category (whisper or tts)."""
-    from pipeline import HF_CACHE_DIR
+    from pipeline import HF_CACHE_DIR, dir_size
     category = request.args.get("category", "")  # "whisper" or "tts"
     result = []
 
@@ -1237,10 +1237,7 @@ def list_downloaded_models():
             kind, engine = _classify_hf_model(model_name)
             if category and category != kind:
                 continue
-            total = sum(
-                os.path.getsize(os.path.join(root, f))
-                for root, _, files in os.walk(dp) for f in files
-            )
+            total = dir_size(dp)
             result.append({
                 "name": model_name,
                 "engine": engine,
