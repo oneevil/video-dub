@@ -22,23 +22,41 @@ ok()  { printf '\033[32m✓\033[0m %s\n' "$*"; }
 [ -n "$P12" ] || die "укажите путь к .p12 — см. комментарий в начале скрипта"
 [ -f "$P12" ] || die "файл не найден: $P12"
 
-# Проверяем, что внутри именно Developer ID и что закрытый ключ на месте:
-# без ключа codesign в CI молча не найдёт идентичность
+# Проверяем импортом во временную связку ключей — ровно так же, как это делает
+# CI. openssl здесь не годится: «Связка ключей» пишет .p12 старыми алгоритмами
+# (PBE-SHA1-3DES/RC2), а OpenSSL 3 без провайдера legacy отвергает их с ошибкой,
+# неотличимой от неверного пароля.
 read -r -s -p "Пароль от .p12: " P12_PWD
 echo
-DUMP="$(openssl pkcs12 -in "$P12" -passin pass:"$P12_PWD" -nokeys -clcerts 2>/dev/null \
-        | openssl x509 -noout -subject -enddate 2>/dev/null)" \
-  || die "не удалось прочитать .p12 — неверный пароль?"
 
-grep -q "Developer ID Application" <<<"$DUMP" \
-  || die "в .p12 нет сертификата Developer ID Application:\n$DUMP"
-openssl pkcs12 -in "$P12" -passin pass:"$P12_PWD" -nocerts -noout 2>/dev/null \
-  || die "в .p12 нет закрытого ключа — экспортируйте сертификат вместе с ним"
+TMP_DIR="$(mktemp -d)"
+KEYCHAIN="$TMP_DIR/verify.keychain"
+trap 'security delete-keychain "$KEYCHAIN" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
-ok "Сертификат корректен"
-sed 's/^/   /' <<<"$DUMP"
+security create-keychain -p verify "$KEYCHAIN" >/dev/null
+security unlock-keychain -p verify "$KEYCHAIN" >/dev/null
+security import "$P12" -k "$KEYCHAIN" -P "$P12_PWD" -T /usr/bin/codesign >/dev/null 2>&1 \
+  || die "не удалось импортировать .p12 — проверьте пароль"
 
-TEAM_ID="$(sed -n 's/.*Developer ID Application: .*(\([A-Z0-9]*\)).*/\1/p' <<<"$DUMP")"
+# find-identity показывает только полные идентичности: сертификат + закрытый
+# ключ. Если ключ не экспортировали, список окажется пустым — и codesign в CI
+# молча не нашёл бы, чем подписывать.
+#
+# Без -v намеренно: этот флаг дополнительно требует доверенной цепочки, а во
+# временной связке промежуточных сертификатов Apple нет, и валидный ключ
+# выглядел бы отсутствующим.
+#
+# `|| true` обязателен: при pipefail пустой grep вернёт 1 и set -e оборвёт
+# скрипт молча, не дав показать объяснение ниже
+IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
+            | grep 'Developer ID Application' | head -1 | sed 's/.*"\([^"]*\)".*/\1/' || true)"
+[ -n "$IDENTITY" ] || die "в .p12 нет пары «Developer ID Application + закрытый ключ».
+   В «Связке ключей» раскройте треугольник у сертификата и экспортируйте его
+   вместе с ключом, выбрав именно сертификат, а не ключ."
+
+ok "Сертификат корректен: $IDENTITY"
+
+TEAM_ID="$(sed -n 's/.*(\([A-Z0-9]*\))$/\1/p' <<<"$IDENTITY")"
 [ -n "$TEAM_ID" ] || TEAM_ID="$TEAM_ID_DEFAULT"
 
 base64 -i "$P12" | tr -d '\n' | pbcopy
