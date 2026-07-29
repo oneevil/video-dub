@@ -43,12 +43,17 @@
 | Система | Файл | Что делать |
 |---------|------|------------|
 | **Windows** | `Video-Dub-*-setup.exe` | Запустить установщик, дальше ярлык на рабочем столе |
-| **macOS** | `Video-Dub-*.dmg` | Открыть, перетащить в Applications. Первый запуск — правый клик → «Открыть» (приложение без сертификата Apple) |
+| **macOS** | `Video-Dub-*.dmg` | Открыть, перетащить в Applications, запустить |
 | **Linux** | `install.sh` | `curl -LsSf https://raw.githubusercontent.com/OneEvil/video-dub/main/install.sh \| bash`, затем команда `video-dub` |
 
 Больше делать ничего не нужно: при первом запуске приложение само поставит Python
 нужной версии, ffmpeg и зависимости, создаст `.env` и откроет браузер. Займёт
 несколько минут — качается несколько гигабайт.
+
+> **macOS:** сборка подписана Developer ID и нотаризована Apple, поэтому открывается
+> без предупреждений. Данные приложения (модели, окружения, проекты) лежат в
+> `~/Library/Application Support/Video-Dub` — сам бандл не изменяется, иначе бы
+> ломалась подпись.
 
 > **Windows:** ставится именно shared-сборка ffmpeg. Обычная статическая не подходит —
 > ML-библиотеки (torchcodec) грузят `avcodec-*.dll` напрямую и без них падают.
@@ -86,7 +91,8 @@ uv run python setup_all.py
 ### Сборка установщиков
 
 ```bash
-packaging/macos/build_dmg.sh 0.1.0                          # macOS → dist/*.dmg
+packaging/macos/build_dmg.sh 0.1.0                          # macOS → dist/*.dmg (подпись ad-hoc)
+NOTARY_PROFILE=video-dub packaging/macos/build_dmg.sh 0.1.0  # + подпись Developer ID и нотаризация
 .\packaging\windows\build_installer.ps1 -Version 0.1.0      # Windows → dist/*.exe (нужен Inno Setup 6)
 ```
 

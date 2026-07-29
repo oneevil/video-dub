@@ -50,13 +50,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # ── исполняемый файл ─────────────────────────────────────────────────────────
-# Первый запуск долгий (качается Python, ffmpeg, torch), поэтому открываем
-# Terminal — иначе пользователь несколько минут смотрит на прыгающую иконку и
-# не понимает, живо ли приложение.
+# Бандл — неизменяемый шаблон: приложение создаёт venv'ы, качает модели и пишет
+# runtime/ рядом с кодом, а делать это внутри .app нельзя. Запись сломала бы
+# подпись (macOS объявит приложение повреждённым), да и /Applications требует
+# админских прав. Поэтому копируем код в Application Support и работаем оттуда.
+#
+# Terminal открываем потому, что первый запуск идёт минутами (Python, ffmpeg,
+# torch) — иначе пользователь смотрит на прыгающую иконку и не знает, живо ли всё.
 cat > "$APP/Contents/MacOS/video-dub" <<'LAUNCHER'
 #!/bin/bash
-APP_ROOT="$(cd "$(dirname "$0")/../Resources/app" && pwd)"
-open -a Terminal "$APP_ROOT/scripts/bootstrap.sh"
+set -e
+BUNDLE_APP="$(cd "$(dirname "$0")/../Resources/app" && pwd)"
+DATA_DIR="$HOME/Library/Application Support/Video-Dub"
+
+mkdir -p "$DATA_DIR"
+# Обновляем код, сохраняя пользовательские данные: настройки, голоса, модели,
+# проекты и уже собранные окружения переживают установку новой версии.
+rsync -a --delete \
+  --exclude '.env' --exclude 'voices/' --exclude 'models/' --exclude 'projects/' \
+  --exclude 'runtime/' --exclude '.venv' --exclude '.venv-*' --exclude '.latentsync/' \
+  "$BUNDLE_APP/" "$DATA_DIR/"
+
+# Голоса из комплекта кладём только при первой установке: дальше это уже
+# каталог пользователя, и перезаписывать его обновлением нельзя
+[ -d "$DATA_DIR/voices" ] || cp -R "$BUNDLE_APP/voices" "$DATA_DIR/voices"
+
+open -a Terminal "$DATA_DIR/scripts/bootstrap.sh"
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/video-dub" "$PAYLOAD/scripts/bootstrap.sh"
 
@@ -76,10 +95,23 @@ else
 fi
 
 # ── подпись ──────────────────────────────────────────────────────────────────
-# Без сертификата разработчика ad-hoc подписи достаточно, чтобы приложение
-# запускалось локально. Gatekeeper всё равно потребует «Открыть всё равно»
-# при первом запуске скачанного .dmg — это ожидаемо и описано в README.
-codesign --force --deep --sign - "$APP" 2>/dev/null || echo "! codesign пропущен"
+# С сертификатом Developer ID приложение проходит Gatekeeper без предупреждений.
+# Без него откатываемся на ad-hoc — запускается локально, но скачанную копию
+# система заблокирует (см. README про снятие карантина).
+SIGN_ID="${MACOS_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -m1 'Developer ID Application' | sed 's/.*"\(.*\)"/\1/')}"
+
+if [ -n "$SIGN_ID" ]; then
+  echo "▸ Подписываю: $SIGN_ID"
+  # --options runtime обязателен для нотаризации; --timestamp тоже,
+  # иначе подпись «протухнет» вместе с сертификатом
+  codesign --force --deep --options runtime --timestamp \
+           --sign "$SIGN_ID" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+else
+  echo "! Developer ID не найден — подписываю ad-hoc"
+  codesign --force --deep --sign - "$APP" 2>/dev/null || echo "! codesign пропущен"
+fi
 
 # ── dmg ──────────────────────────────────────────────────────────────────────
 STAGE="$DIST/stage"
@@ -89,5 +121,35 @@ ln -s /Applications "$STAGE/Applications"      # привычный drag-and-dro
 
 hdiutil create -volname "Video-Dub" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 rm -rf "$STAGE"
+
+# ── нотаризация ──────────────────────────────────────────────────────────────
+# Подписи мало: Gatekeeper на скачанном файле требует ещё и билет от Apple.
+# Учётные данные берём из keychain-профиля или из переменных окружения (CI).
+# Разовая настройка профиля:
+#   xcrun notarytool store-credentials video-dub \
+#     --apple-id <e-mail> --team-id 76KE738FKP --password <app-specific-password>
+if [ -n "$SIGN_ID" ]; then
+  codesign --force --timestamp --sign "$SIGN_ID" "$DMG"
+
+  if [ -n "${NOTARY_PROFILE:-}" ]; then
+    NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+  elif [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ]; then
+    NOTARY_ARGS=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID")
+  else
+    NOTARY_ARGS=()
+  fi
+
+  if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
+    echo "▸ Отправляю на нотаризацию (несколько минут)..."
+    xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait
+    # Степлер вшивает билет в образ, чтобы он проверялся без интернета
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    echo "✓ Нотаризовано"
+  else
+    echo "! Учётные данные нотаризации не заданы — образ подписан, но не нотаризован"
+    echo "  Настройка: xcrun notarytool store-credentials video-dub --apple-id … --team-id … --password …"
+  fi
+fi
 
 echo "✓ $DMG"
