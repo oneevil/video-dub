@@ -6,6 +6,7 @@ name: release
 
 on:
   push:
+    branches: [main]     # проверка сборки на каждом коммите, без публикации
     tags: ['v*']
   workflow_dispatch:
 
@@ -15,6 +16,8 @@ permissions:
 jobs:
   macos:
     runs-on: macos-14          # arm64 — целевая платформа Apple Silicon
+    # Только на тегах: минуты macOS-раннера списываются с коэффициентом 10
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
         with:

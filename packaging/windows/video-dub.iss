@@ -1,4 +1,4 @@
-; Инсталлятор Video-Dub для Windows (Inno Setup 6).
+﻿; Инсталлятор Video-Dub для Windows (Inno Setup 6).
 ;
 ; Внутрь кладём только исходники и лаунчер — Python, ffmpeg и torch приезжают
 ; при первом запуске через bootstrap.ps1. Собирать всё в один .exe нельзя:
@@ -27,6 +27,7 @@ OutputBaseFilename=Video-Dub-{#MyAppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=icon.ico
 ; Ставим в Program Files → нужны права администратора
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
