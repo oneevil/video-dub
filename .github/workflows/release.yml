@@ -46,8 +46,9 @@ jobs:
       - name: Собрать установщик
         shell: pwsh
         run: |
+          # На пуше в ветку GITHUB_REF_NAME = "main" — версией это быть не может
           $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
-          if (-not $version) { $version = '0.0.0-dev' }
+          if ($version -notmatch '^\d+\.\d+') { $version = '0.0.0-dev' }
           .\packaging\windows\build_installer.ps1 -Version $version
 
       - uses: actions/upload-artifact@v4

@@ -28,8 +28,14 @@ Remove-Item -Recurse -Force $Dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Payload | Out-Null
 
 Push-Location $Root
+$prevEncoding = [Console]::OutputEncoding
 try {
-    $files = git ls-files --cached --others --exclude-standard
+    # core.quotepath=off — иначе git отдаёт пути с не-ASCII в кавычках и
+    # восьмеричных escape'ах ("voices/\320\232..."), и Copy-Item получает
+    # несуществующее имя файла. UTF-8 нужен, чтобы PowerShell не прочитал
+    # вывод git в кодировке консоли Windows.
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $files = git -c core.quotepath=off ls-files --cached --others --exclude-standard
     if ($LASTEXITCODE -ne 0) { throw 'git ls-files завершился с ошибкой' }
     foreach ($rel in $files) {
         $dst = Join-Path $Payload $rel
@@ -37,6 +43,7 @@ try {
         Copy-Item -LiteralPath $rel -Destination $dst -Force
     }
 } finally {
+    [Console]::OutputEncoding = $prevEncoding
     Pop-Location
 }
 if (-not (Test-Path (Join-Path $Payload 'scripts\bootstrap.ps1'))) {
