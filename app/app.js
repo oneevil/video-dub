@@ -1889,9 +1889,30 @@ function startSubSync() {
 let ttsWorkDir = '';
 let ttsSegments = new Set();
 let ttsAudioEl = null;
+let ttsPlayingIdx = null;      // какой сегмент играет сейчас — переживает перерисовку списка
 let ttsSyncPlaying = new Map(); // index -> Audio
 let ttsSyncDone = new Set();   // segments that finished in this playback
 let _ttsSeeking = false;       // suppress TTS creation during seek
+
+const _TTS_ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+const _TTS_ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+
+/** Кнопку ищем по id, а не по ссылке: список перерисовывается во время генерации. */
+function _ttsPlayBtnState(index, playing) {
+  const b = document.getElementById(`tts-play-${index}`);
+  if (!b) return;
+  b.classList.toggle('playing', playing);
+  b.innerHTML = playing ? _TTS_ICON_PAUSE : _TTS_ICON_PLAY;
+}
+
+function _stopTtsPreview() {
+  if (ttsAudioEl) { ttsAudioEl.pause(); ttsAudioEl.src = ''; ttsAudioEl = null; }
+  if (ttsPlayingIdx !== null) {
+    const idx = ttsPlayingIdx;
+    ttsPlayingIdx = null;
+    _ttsPlayBtnState(idx, false);
+  }
+}
 
 
 function loadTtsSegments(workDir, thenRender) {
@@ -2100,25 +2121,33 @@ function renderSubtitles() {
       play.className = 'btn-play-tts';
       play.id = `tts-play-${sub.index}`;
       play.title = 'Прослушать TTS';
-      play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+      // список перерисовывается на каждый новый сегмент — восстанавливаем вид играющей кнопки
+      const isPlaying = ttsPlayingIdx === sub.index;
+      play.classList.toggle('playing', isPlaying);
+      play.innerHTML = isPlaying ? _TTS_ICON_PAUSE : _TTS_ICON_PLAY;
       play.onclick = (e) => {
         e.stopPropagation();
-        // Toggle pause if this button is already playing
-        if (play.classList.contains('playing')) {
-          if (ttsAudioEl) { ttsAudioEl.pause(); ttsAudioEl = null; }
-          play.classList.remove('playing'); play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
-          return;
-        }
-        // Stop any other playing audio
-        if (ttsAudioEl) { ttsAudioEl.pause(); ttsAudioEl = null; }
-        document.querySelectorAll('.btn-play-tts.playing').forEach(b => { b.classList.remove('playing'); b.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'; });
+        const idx = sub.index;
+        const wasPlaying = ttsPlayingIdx === idx;
+        _stopTtsPreview();          // останавливаем и этот сегмент, и любой другой
+        if (wasPlaying) return;     // повторный клик = пауза
+        if (voicePreviewEl) { voicePreviewEl.pause(); voicePreviewEl = null; }
+        document.querySelectorAll('.btn-play-tts.playing').forEach(b => {
+          b.classList.remove('playing'); b.innerHTML = _TTS_ICON_PLAY;
+        });
         const audio = new Audio(audioUrl + '&t=' + Date.now());
         ttsAudioEl = audio;
-        play.classList.add('playing');
-        play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
-        audio.play();
-        audio.onended = () => { play.classList.remove('playing'); play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'; ttsAudioEl = null; };
-        audio.onerror = () => { play.classList.remove('playing'); play.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'; ttsAudioEl = null; };
+        ttsPlayingIdx = idx;
+        _ttsPlayBtnState(idx, true);
+        const finish = () => {
+          if (ttsAudioEl !== audio) return;   // уже переключились на другой сегмент
+          ttsAudioEl = null;
+          ttsPlayingIdx = null;
+          _ttsPlayBtnState(idx, false);
+        };
+        audio.onended = finish;
+        audio.onerror = finish;
+        audio.play().catch(finish);
       };
       actions.appendChild(play);
 
@@ -2129,6 +2158,7 @@ function renderSubtitles() {
       delTts.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span style="font-size:9px;margin-left:2px">TTS</span>';
       delTts.onclick = (e) => {
         e.stopPropagation();
+        if (ttsPlayingIdx === sub.index) _stopTtsPreview();
         const segPath = ttsWorkDir + '/tts_audio/' + segFile;
         fetch('/delete-tts-segment', {
           method: 'POST',
@@ -2520,11 +2550,12 @@ let voicePreviewEl = null;
 function playVoiceWav(name, file, btn) {
   if (btn.classList.contains('playing')) {
     if (voicePreviewEl) { voicePreviewEl.pause(); voicePreviewEl = null; }
-    btn.classList.remove('playing'); btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    btn.classList.remove('playing'); btn.innerHTML = _TTS_ICON_PLAY;
     return;
   }
   if (voicePreviewEl) { voicePreviewEl.pause(); voicePreviewEl = null; }
-  document.querySelectorAll('.btn-play-tts.playing').forEach(b => { b.classList.remove('playing'); b.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'; });
+  _stopTtsPreview();
+  document.querySelectorAll('.btn-play-tts.playing').forEach(b => { b.classList.remove('playing'); b.innerHTML = _TTS_ICON_PLAY; });
   const url = `/voice-audio?name=${encodeURIComponent(name)}&file=${encodeURIComponent(file)}`;
   voicePreviewEl = new Audio(url);
   btn.classList.add('playing');
