@@ -7,5 +7,7 @@ __pycache__/
 .venv-*/
 models/
 projects/
+dist/
+runtime/
 voices/**/.elevenlabs_clone_*.json
 voices/**/.fish_clone_*.json

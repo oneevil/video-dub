@@ -1,0 +1,123 @@
+name: release
+
+# Собирает установщики для трёх платформ и выкладывает их в Releases.
+# Запуск: git tag v0.1.0 && git push --tags
+# Ручной прогон (workflow_dispatch) собирает артефакты, но релиз не создаёт.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14          # arm64 — целевая платформа Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # build_dmg.sh использует git archive
+
+      - name: Собрать .dmg
+        run: |
+          chmod +x packaging/macos/build_dmg.sh
+          packaging/macos/build_dmg.sh "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Установить Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Собрать установщик
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
+          if (-not $version) { $version = '0.0.0-dev' }
+          .\packaging\windows\build_installer.ps1 -Version $version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: dist/*.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Собрать архив
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ -n "$version" ] || version="0.0.0-dev"
+          mkdir -p dist "dist/video-dub-$version"
+          git archive HEAD | tar -C "dist/video-dub-$version" -xf -
+          tar -C dist -czf "dist/video-dub-$version-linux.tar.gz" "video-dub-$version"
+          rm -rf "dist/video-dub-$version"
+          cp install.sh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: |
+            dist/*.tar.gz
+            dist/install.sh
+
+  # Проверяем, что скрипты не сломаны, до того как они попадут в релиз
+  lint-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -S warning scripts/bootstrap.sh install.sh packaging/macos/build_dmg.sh
+      - name: Синтаксис PowerShell
+        shell: pwsh
+        run: |
+          foreach ($f in 'scripts/bootstrap.ps1','packaging/windows/build_installer.ps1') {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors; throw "$f содержит синтаксические ошибки" }
+            Write-Host "ok $f"
+          }
+
+  publish:
+    needs: [macos, windows, linux, lint-scripts]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          body: |
+            ## Установка
+
+            | Система | Файл | Что делать |
+            |---|---|---|
+            | **Windows** | `Video-Dub-*-setup.exe` | Запустить установщик |
+            | **macOS** | `Video-Dub-*.dmg` | Открыть, перетащить в Applications. Первый запуск: правый клик → «Открыть» |
+            | **Linux** | `install.sh` | `curl -LsSf .../install.sh \| bash`, затем `video-dub` |
+
+            При первом запуске приложение само скачает Python, ffmpeg и ML-библиотеки —
+            это несколько минут и несколько гигабайт. Модели распознавания и озвучки
+            качаются отдельно из настроек.

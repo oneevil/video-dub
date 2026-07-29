@@ -36,98 +36,63 @@
 
 ## Установка
 
-### 1. Установка uv
+### Готовые сборки (рекомендуется)
 
-[uv](https://docs.astral.sh/uv/) — быстрый менеджер Python пакетов и окружений.
+Скачайте с [Releases](https://github.com/OneEvil/video-dub/releases):
 
-**macOS / Linux:**
+| Система | Файл | Что делать |
+|---------|------|------------|
+| **Windows** | `Video-Dub-*-setup.exe` | Запустить установщик, дальше ярлык на рабочем столе |
+| **macOS** | `Video-Dub-*.dmg` | Открыть, перетащить в Applications. Первый запуск — правый клик → «Открыть» (приложение без сертификата Apple) |
+| **Linux** | `install.sh` | `curl -LsSf https://raw.githubusercontent.com/OneEvil/video-dub/main/install.sh \| bash`, затем команда `video-dub` |
+
+Больше делать ничего не нужно: при первом запуске приложение само поставит Python
+нужной версии, ffmpeg и зависимости, создаст `.env` и откроет браузер. Займёт
+несколько минут — качается несколько гигабайт.
+
+> **Windows:** ставится именно shared-сборка ffmpeg. Обычная статическая не подходит —
+> ML-библиотеки (torchcodec) грузят `avcodec-*.dll` напрямую и без них падают.
+
+> **NVIDIA:** для GPU-ускорения нужен установленный [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) 12.4+
+> и драйвер (`nvidia-smi`). Отдельно cuDNN не нужен — PyTorch несёт его с собой.
+> Без CUDA всё работает на процессоре, только медленнее.
+
+### Запуск из исходников
+
+Нужен [uv](https://docs.astral.sh/uv/) и ffmpeg в PATH.
+
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone https://github.com/OneEvil/video-dub
+cd video-dub
+./scripts/bootstrap.sh          # macOS / Linux
+.\Video-Dub.bat                 # Windows
 ```
 
-**Windows (PowerShell):**
-```
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-После установки перезапустите терминал. Проверьте: `uv --version`
-
-### 2. Системные зависимости
-
-**macOS:**
-```bash
-brew install ffmpeg yt-dlp
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install ffmpeg
-pip install yt-dlp
-```
-
-**Windows (scoop):**
-
-Установка scoop (если ещё не установлен): https://scoop.sh
-```
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-irm get.scoop.sh | iex
-```
-
-```
-scoop install ffmpeg-shared yt-dlp
-```
-
-> **Важно:** устанавливайте именно `ffmpeg-shared`, а не `ffmpeg`. ML-библиотеки (torchcodec) требуют FFmpeg DLL-файлы (`avcodec-*.dll`, `avformat-*.dll`). Обычный `scoop install ffmpeg` ставит статическую сборку без DLL.
->
-> Альтернатива: скачайте `ffmpeg-release-full-shared` с [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), распакуйте, добавьте папку `bin/` в системный `PATH`.
->
-> Проверка: `where avcodec-62.dll` — должен найти файл.
-
-### 3. Установка CUDA (Windows — для GPU ускорения)
-
-CUDA необходима для ускорения ML-моделей (Whisper, TTS, LatentSync) на видеокартах NVIDIA.
-
-1. Проверьте что у вас установлен драйвер NVIDIA: `nvidia-smi`
-2. Скачайте [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (рекомендуется 12.4+)
-3. Установите, следуя инструкциям инсталлятора
-4. Добавьте в PATH (обычно автоматически):
-   - `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\bin`
-   - `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x\libnvvp`
-5. Перезагрузите компьютер
-6. Проверьте установку:
-   ```
-   nvcc --version
-   nvidia-smi
-   ```
-
-> **Примечание:** cuDNN устанавливать отдельно не нужно — PyTorch включает его в свои пакеты.
-
-### 4. Настройка
+`bootstrap` проверит окружение, доустановит недостающее и запустит сервер на
+http://localhost:5050. Если хочется вручную:
 
 ```bash
 cp .env.example .env
-# Отредактируйте .env или настройте через веб-интерфейс
-```
-
-### 5. Установка и запуск
-
-```bash
-# Основной проект (лёгкий — Flask, API клиенты)
 uv sync
-
-# Запуск
 uv run python app.py
 ```
 
-Откроется на http://localhost:5050
-
-### 6. ML-окружения (опционально)
-
-ML-окружения создаются автоматически при первом использовании каждого движка. Но можно установить все заранее:
+ML-окружения создаются сами при первом использовании движка. Поставить все заранее:
 
 ```bash
 uv run python setup_all.py
 ```
+
+### Сборка установщиков
+
+```bash
+packaging/macos/build_dmg.sh 0.1.0                          # macOS → dist/*.dmg
+.\packaging\windows\build_installer.ps1 -Version 0.1.0      # Windows → dist/*.exe (нужен Inno Setup 6)
+```
+
+Обычно этого не требуется: `git tag v0.1.0 && git push --tags` запускает
+[GitHub Actions](.github/workflows/release.yml), который собирает все три
+платформы и выкладывает их в Releases.
 
 ---
 
@@ -347,6 +312,12 @@ video-dub/
 │   ├── app.html            # Веб-интерфейс (Jinja2)
 │   ├── app.css             # Стили
 │   └── app.js              # Клиентская логика
+├── scripts/
+│   ├── bootstrap.sh        # Запуск: macOS / Linux
+│   └── bootstrap.ps1       # Запуск: Windows
+├── packaging/
+│   ├── macos/              # Сборка .app и .dmg
+│   └── windows/            # Инсталлятор Inno Setup
 ├── plugins/
 │   ├── transcribe/         # Плагины транскрипции + workers
 │   ├── translate/          # Плагины перевода

@@ -2200,6 +2200,20 @@ def main():
     print(f"\n  Откройте ссылку в браузере. Ctrl+C для остановки.\n")
     server = WSGIServer((host, port), app)
 
+    if os.environ.get("VIDEO_DUB_OPEN_BROWSER") == "1":
+        # Открываем только после старта сервера, иначе вкладка встретит «отказано
+        # в соединении». gevent.spawn_later не блокирует основной цикл.
+        import gevent
+        import webbrowser
+
+        def _open():
+            try:
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            except Exception:
+                pass
+
+        gevent.spawn_later(1.0, _open)
+
     def shutdown(*_):
         print("\nОстановка...")
         server.stop()
