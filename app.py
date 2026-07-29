@@ -136,7 +136,6 @@ DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 DEFAULT_TTS_ENGINE = os.environ.get("TTS_ENGINE", "omnivoice")
 DEFAULT_TTS_VOICE = os.environ.get("TTS_VOICE", "")
 DEFAULT_TTS_SEED = int(os.environ.get("TTS_SEED", "44"))
-DEFAULT_TTS_TEMPERATURE = float(os.environ.get("TTS_TEMPERATURE", "0.5"))
 DEFAULT_TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.0"))
 DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("OUTPUT_DIR", "./projects")
@@ -214,12 +213,11 @@ class Job:
         self.translate_model = TRANSLATE_MODEL
         self.translate_base_url = ""
         # TTS settings
-        self.tts_engine = "qwen3-tts"
+        self.tts_engine = DEFAULT_TTS_ENGINE
         self.tts_voice = ""
         self.tts_voice_wav = ""
         self.tts_voice_text = ""
         self.tts_seed = DEFAULT_TTS_SEED
-        self.tts_temperature = DEFAULT_TTS_TEMPERATURE
         self.tts_speed = DEFAULT_TTS_SPEED
         self.num_speakers = 0
         self.speaker_voice_map = None
@@ -366,7 +364,6 @@ def index():
         default_tts_engine=DEFAULT_TTS_ENGINE,
         default_tts_voice=DEFAULT_TTS_VOICE,
         default_tts_seed=DEFAULT_TTS_SEED,
-        default_tts_temperature=DEFAULT_TTS_TEMPERATURE,
         default_tts_speed=DEFAULT_TTS_SPEED,
         default_separate_vocals=DEFAULT_SEPARATE_VOCALS,
         default_merge_sentences=DEFAULT_MERGE_SENTENCES,
@@ -447,10 +444,9 @@ def start():
     job.translate_provider = provider
     job.translate_model = translate_model
     job.translate_base_url = base_url
-    job.tts_engine = data.get("tts_engine", "qwen3-tts")
+    job.tts_engine = data.get("tts_engine", DEFAULT_TTS_ENGINE)
     job.tts_voice = data.get("tts_voice", "")
     job.tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
-    job.tts_temperature = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
     job.tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
     job.num_speakers = int(data.get("num_speakers", 0))
     job.speaker_voice_map = data.get("speaker_voice_map")
@@ -1119,7 +1115,6 @@ def tts_test():
         voice_wav, voice_text = _get_voice_reference(tts_voice)
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
-    tts_temp = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
     tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
 
     task_id = uuid.uuid4().hex[:8]
@@ -1139,8 +1134,7 @@ def tts_test():
                 [sub], tmp_dir, lambda msg: q.put({"event": "log", "data": {"message": msg}}),
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
-                seed=tts_seed, temperature=tts_temp,
-                speed=tts_speed,
+                seed=tts_seed, speed=tts_speed,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -1400,7 +1394,6 @@ def tts_single():
         voice_wav, voice_text = _get_voice_reference(tts_voice)
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
-    tts_temp = float(data.get("tts_temperature", DEFAULT_TTS_TEMPERATURE))
     tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
     # Delete existing segment so it gets regenerated
     existing = os.path.join(work_dir, "tts_audio", f"seg_{index:04d}.wav")
@@ -1422,8 +1415,7 @@ def tts_single():
                 [sub], work_dir, lambda msg: q.put({"event": "log", "data": {"message": msg}}),
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
-                seed=tts_seed, temperature=tts_temp,
-                speed=tts_speed,
+                seed=tts_seed, speed=tts_speed,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -1669,7 +1661,7 @@ def save_settings():
     global ANTHROPIC_API_KEY, OPENAI_API_KEY, CUSTOM_API_KEY, CUSTOM_API_URL, HF_TOKEN, ELEVENLABS_API_KEY, FISH_API_KEY
     global OLLAMA_URL, TRANSLATE_PROVIDER, TRANSLATE_MODEL
     global DEFAULT_TRANSCRIBE_ENGINE, DEFAULT_WHISPER_MODEL
-    global DEFAULT_TTS_ENGINE, DEFAULT_TTS_VOICE, DEFAULT_TTS_SEED, DEFAULT_TTS_TEMPERATURE, DEFAULT_TTS_SPEED, DEFAULT_OUTPUT_DIR
+    global DEFAULT_TTS_ENGINE, DEFAULT_TTS_VOICE, DEFAULT_TTS_SEED, DEFAULT_TTS_SPEED, DEFAULT_OUTPUT_DIR
     global DEFAULT_SEPARATE_VOCALS, DEFAULT_MERGE_SENTENCES, DEFAULT_BUILD_FORMAT, DEFAULT_BUILD_CODEC, DEFAULT_BUILD_PRESET
     global DEFAULT_BUILD_AUDIO_BITRATE, DEFAULT_BUILD_MAX_SLOWDOWN, DEFAULT_BUILD_ORIGINAL_AUDIO
     global DEFAULT_BUILD_ORIGINAL_VOLUME, DEFAULT_BUILD_NO_VOCALS_VOLUME, DEFAULT_BUILD_VOCALS_VOLUME
@@ -1697,7 +1689,6 @@ def save_settings():
         "tts_engine":         "TTS_ENGINE",
         "tts_voice":          "TTS_VOICE",
         "tts_seed":           "TTS_SEED",
-        "tts_temperature":    "TTS_TEMPERATURE",
         "tts_speed":          "TTS_SPEED",
         "output_dir":         "OUTPUT_DIR",
         "build_format":       "BUILD_FORMAT",
@@ -1756,8 +1747,6 @@ def save_settings():
         DEFAULT_TTS_VOICE = data["tts_voice"]
     if "tts_seed" in data:
         DEFAULT_TTS_SEED = int(data["tts_seed"])
-    if "tts_temperature" in data:
-        DEFAULT_TTS_TEMPERATURE = float(data["tts_temperature"])
     if "tts_speed" in data:
         DEFAULT_TTS_SPEED = float(data["tts_speed"])
     if "output_dir" in data:
@@ -2085,7 +2074,6 @@ def _run_pipeline(job: Job, api_key: str):
                 voice_wav=job.tts_voice_wav,
                 voice_text=job.tts_voice_text,
                 seed=job.tts_seed,
-                temperature=job.tts_temperature,
                 speed=job.tts_speed,
                 speaker_voice_map=job.speaker_voice_map,
                 language=job.language,

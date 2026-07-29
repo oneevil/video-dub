@@ -291,25 +291,19 @@ onProviderChange();
 
 function onTtsEngineChange() {
   const eng = document.getElementById('ttsEngine').value;
-  const isBase = eng.includes('-base');
-  const isCustom = eng.includes('-custom');
   const isEdge = eng === 'edge-tts';
   const isMacos = eng === 'macos-say';
   const isOmni = eng === 'omnivoice';
   const isElevenlabs = eng === 'elevenlabs';
   const isFish = eng === 'fish-audio';
-  const isQwen = isBase || isCustom;
-  const hasSeed = isQwen || isOmni;
   const isCloudWithClone = isElevenlabs || isFish;
-  document.getElementById('ttsBaseVoiceField').style.display = isCustom ? 'block' : 'none';
-  document.getElementById('ttsClonedVoiceField').style.display = (isBase || isOmni) ? 'block' : 'none';
+  document.getElementById('ttsClonedVoiceField').style.display = isOmni ? 'block' : 'none';
   document.getElementById('ttsEdgeVoiceField').style.display = isEdge ? 'block' : 'none';
   document.getElementById('ttsMacosVoiceField').style.display = isMacos ? 'block' : 'none';
   document.getElementById('ttsVoiceModeField').style.display = isCloudWithClone ? 'block' : 'none';
-  const showSeedRow = hasSeed || isQwen;
-  document.getElementById('ttsSeedTempRow').style.display = showSeedRow ? 'grid' : 'none';
-  document.getElementById('ttsSeedField').style.display = hasSeed ? 'block' : 'none';
-  document.getElementById('ttsTempField').style.display = isQwen ? 'block' : 'none';
+  // Строка seed/скорость нужна всегда: скорость применима к любому движку
+  document.getElementById('ttsSeedTempRow').style.display = 'grid';
+  document.getElementById('ttsSeedField').style.display = isOmni ? 'block' : 'none';
   document.getElementById('ttsElevenlabsKeyField').style.display = isElevenlabs ? 'block' : 'none';
   document.getElementById('ttsFishKeyField').style.display = isFish ? 'block' : 'none';
   if (isEdge) loadEdgeVoices();
@@ -336,7 +330,6 @@ function onVoiceModeChange() {
 
 function getTtsVoice() {
   const eng = document.getElementById('ttsEngine').value;
-  if (eng.includes('-custom')) return document.getElementById('ttsBaseVoice').value;
   if (eng === 'edge-tts') return document.getElementById('ttsEdgeVoice').value;
   if (eng === 'macos-say') return document.getElementById('ttsMacosVoice').value;
   if (eng === 'elevenlabs' || eng === 'fish-audio') {
@@ -1355,7 +1348,6 @@ function startJob() {
     tts_engine: document.getElementById('ttsEngine').value,
     tts_voice: getTtsVoice(),
     tts_seed: getTtsSeed(),
-    tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7,
     tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
     num_speakers: parseInt(document.getElementById('numSpeakers').value) || 0,
     speaker_voice_map: Object.keys(speakerVoiceMap).length ? speakerVoiceMap : undefined,
@@ -2232,8 +2224,7 @@ function renderSubtitles() {
             tts_engine: ttsEngine,
             tts_voice: ttsVoice,
             tts_seed: getTtsSeed(),
-            tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7,
-    tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
+            tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
           })
         })
         .then(r => r.json())
@@ -2608,7 +2599,7 @@ function testTtsVoice() {
   fetch('/tts-test', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(), tts_temperature: parseFloat(document.getElementById('ttsTemperature').value) || 0.7, tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0 })
+    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(), tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0 })
   })
   .then(r => r.json())
   .then(d => {
@@ -2685,7 +2676,7 @@ function downloadWhisperxExtra(type) {
 
 function downloadModel() {
   const engine = document.getElementById('downloadModelEngine').value;
-  const model = engine === 'tts-qwen3' ? 'qwen3-tts' : document.getElementById('downloadModelName').value;
+  const model = document.getElementById('downloadModelName').value;
   const btn = document.getElementById('btnDownloadModel');
   const status = document.getElementById('downloadModelStatus');
   const msg = document.getElementById('downloadModelMsg');
@@ -3260,12 +3251,7 @@ function showSpeakerMappingPanel(speakers) {
     const updateVoices = () => {
       const eng = engSel.value;
       voiceSel.innerHTML = '';
-      if (eng.includes('-custom')) {
-        // Built-in Qwen voices
-        ['Vivian','Serena','Uncle_Fu','Dylan','Eric','Ryan','Aiden','Ono_Anna','Sohee'].forEach(v => {
-          voiceSel.add(new Option(v, v));
-        });
-      } else if (eng === 'edge-tts') {
+      if (eng === 'edge-tts') {
         voiceSel.add(new Option('Загрузка...', ''));
         fetch('/edge-voices').then(r=>r.json()).then(d => {
           voiceSel.innerHTML = '';
@@ -3297,7 +3283,7 @@ function showSpeakerMappingPanel(speakers) {
           if (s) setTimeout(() => { voiceSel.value = s.voice || ''; }, 100);
         });
       } else {
-        // Qwen base / OmniVoice — cloned voices
+        // OmniVoice — клонированные голоса
         const mainVoice = document.getElementById('ttsVoice');
         voiceSel.innerHTML = mainVoice.innerHTML;
       }

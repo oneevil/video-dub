@@ -453,21 +453,6 @@
             {% endfor %}
           </select>
         </div>
-        <div class="field" id="ttsBaseVoiceField" style="display:none">
-          <label>Голос (встроенный)</label>
-          <select id="ttsBaseVoice" onchange="persistSetting({tts_voice: this.value})">
-            <option value="">По умолчанию</option>
-            <option value="Vivian">Vivian</option>
-            <option value="Serena">Serena</option>
-            <option value="Uncle_Fu">Uncle Fu</option>
-            <option value="Dylan">Dylan</option>
-            <option value="Eric">Eric</option>
-            <option value="Ryan">Ryan</option>
-            <option value="Aiden">Aiden</option>
-            <option value="Ono_Anna">Ono Anna</option>
-            <option value="Sohee">Sohee</option>
-          </select>
-        </div>
         <div class="field" id="ttsClonedVoiceField">
           <label>Клонированный голос</label>
           <select id="ttsVoice" onchange="persistSetting({tts_voice: this.value})">
@@ -528,14 +513,10 @@
             </button>
           </div>
         </div>
-        <div id="ttsSeedTempRow" style="display:none;grid-template-columns:1fr 1fr 1fr;gap:0 12px">
+        <div id="ttsSeedTempRow" style="display:none;grid-template-columns:1fr 1fr;gap:0 12px">
         <div class="field" id="ttsSeedField">
           <label>Seed интонации <span id="ttsSeedValue" style="opacity:.6">{{ default_tts_seed if default_tts_seed >= 0 else 'выкл' }}</span></label>
           <input type="range" id="ttsSeed" min="0" max="100" step="1" value="{{ default_tts_seed if default_tts_seed >= 0 else 0 }}" style="width:100%" oninput="document.getElementById('ttsSeedValue').textContent=this.value==0?'выкл':this.value" onchange="persistSetting({tts_seed: parseInt(this.value) || -1})">
-        </div>
-        <div class="field" id="ttsTempField">
-          <label>Стабильность голоса <span id="ttsTempValue" style="opacity:.6">{{ default_tts_temperature }}</span></label>
-          <input type="range" id="ttsTemperature" min="0.1" max="0.9" step="0.1" value="{{ default_tts_temperature }}" style="width:100%" oninput="document.getElementById('ttsTempValue').textContent=this.value" onchange="persistSetting({tts_temperature: parseFloat(this.value)})">
         </div>
         <div class="field" id="ttsSpeedField">
           <label>Скорость речи <span id="ttsSpeedValue" style="opacity:.6">{{ default_tts_speed }}x</span></label>

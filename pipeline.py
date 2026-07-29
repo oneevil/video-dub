@@ -737,12 +737,11 @@ def _get_voice_reference(voice_name: str) -> tuple[str, str]:
 
 
 def synthesize_speech(subtitles: list[dict], out_dir: str, log,
-                       engine: str = "qwen3-1.7b-base",
+                       engine: str = "omnivoice",
                        voice: str = "",
                        voice_wav: str = "",
                        voice_text: str = "",
                        seed: int = 44,
-                       temperature: float = 0.7,
                        speed: float = 1.0,
                        speaker_voice_map: dict | None = None,
                        language: str = "",
@@ -750,7 +749,7 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
     """Синтезирует речь через выбранный движок (plugin system)."""
     check_cancelled()
     if speaker_voice_map:
-        results = _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed, temperature,
+        results = _tts_multi_speaker(subtitles, out_dir, log, speaker_voice_map, seed,
                                      on_segment=on_segment, default_engine=engine, default_voice=voice,
                                      language=language)
     else:
@@ -759,8 +758,7 @@ def synthesize_speech(subtitles: list[dict], out_dir: str, log,
             raise ProcessingError(f"TTS движок '{engine}' не найден")
         results = plugin.synthesize(subtitles, out_dir, log, engine=engine, voice=voice,
                                  voice_wav=voice_wav, voice_text=voice_text, seed=seed,
-                                 temperature=temperature, language=language,
-                                 on_segment=on_segment)
+                                 language=language, on_segment=on_segment)
     if speed != 1.0:
         _apply_tts_speed(results, speed, log)
     return results
@@ -815,8 +813,7 @@ def _apply_tts_speed(results: list[dict], speed: float, log):
 
 
 def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
-                        speaker_voice_map: dict, seed: int = 44,
-                        temperature: float = 0.7, on_segment=None,
+                        speaker_voice_map: dict, seed: int = 44, on_segment=None,
                         default_engine: str = "", default_voice: str = "",
                         language: str = "") -> list[dict]:
     """Синтезирует речь для нескольких спикеров с разными голосами/движками."""
@@ -847,7 +844,7 @@ def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
         engine = voice_cfg.get("engine") or default_engine or "edge-tts"
         voice = voice_cfg.get("voice", "") or (default_voice if not voice_cfg.get("engine") else "")
 
-        # Reset clone cache for qwen3 plugin if available
+        # Сброс кэша клона — у движков, которые его держат (ElevenLabs, Fish Audio)
         plugin = _TTS_PLUGINS.get(engine)
         if plugin and hasattr(plugin, 'reset_clone_cache'):
             plugin.reset_clone_cache()
@@ -864,7 +861,7 @@ def _tts_multi_speaker(subtitles: list[dict], out_dir: str, log,
 
         result = plugin.synthesize(subs, out_dir, log, engine=engine, voice=voice,
                                    voice_wav=voice_wav, voice_text=voice_text,
-                                   seed=seed, temperature=temperature, language=language,
+                                   seed=seed, language=language,
                                    on_segment=on_segment)
         all_results.extend(result)
 

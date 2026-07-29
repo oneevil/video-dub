@@ -38,7 +38,6 @@ def _torch_index_args():
 VENVS = {
     ".venv-faster-whisper": ["faster-whisper>=1.2.0"],
     ".venv-whisperx": ["whisperx>=3.8.0", "pyannote-audio>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0"],
-    ".venv-qwen3": ["qwen-tts>=0.1.1", "transformers>=4.57.3", "torch>=2.8.0", "torchaudio>=2.8.0", "soundfile>=0.12.0", "numpy"],
     ".venv-omnivoice": ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
     # numpy: demucs объявляет его только для darwin x86_64, но импортирует всегда
     ".venv-demucs": ["demucs>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "numpy"],

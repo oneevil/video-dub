@@ -8,7 +8,7 @@
 - Разделение голоса и фона (demucs) — опционально
 - Транскрипция: Faster Whisper, WhisperX (с диаризацией) — локально, без облака
 - Перевод: Claude, OpenAI, Google Translate, Ollama, Custom OpenAI-совместимый API
-- Синтез речи: Qwen3-TTS Base/CustomVoice, Edge TTS, OmniVoice (600+ языков), ElevenLabs (облако), Fish Audio (облако), macOS Say
+- Синтез речи: OmniVoice (600+ языков, клон голоса), Edge TTS, ElevenLabs (облако), Fish Audio (облако), macOS Say
 - **Lip Sync**: LatentSync — синхронизация губ по аудио (CUDA, на CPU медленно)
 - **Мульти-спикер**: определение говорящих (WhisperX + pyannote), назначение голоса каждому спикеру, ручная смена спикера
 - Клонирование голоса из референс WAV (локально + облачно через ElevenLabs IVC / Fish Audio)
@@ -167,10 +167,9 @@ uv run python setup_all.py
 
 | Переменная | Описание | По умолчанию |
 |-----------|----------|-------------|
-| `TTS_ENGINE` | Движок TTS | `qwen3-1.7b-base` |
+| `TTS_ENGINE` | Движок TTS | `omnivoice` |
 | `TTS_VOICE` | Голос TTS | — |
 | `TTS_SEED` | Seed интонации (фикс. стиль), -1 = выкл | `44` |
-| `TTS_TEMPERATURE` | Стабильность голоса (0.1-0.9) | `0.7` |
 
 ### Сборка
 
@@ -231,8 +230,6 @@ plugins/
 │   └── custom_api.py            # Custom OpenAI-совместимый
 ├── tts/                         # TTS движки
 │   ├── __init__.py              # Авто-обнаружение плагинов
-│   ├── qwen3.py                 # Qwen3-TTS (.venv-qwen3)
-│   ├── qwen3_worker.py          # Persistent worker-процесс
 │   ├── edge.py                  # Edge TTS (без venv)
 │   ├── elevenlabs.py            # ElevenLabs (облако, без venv)
 │   ├── fish_audio.py            # Fish Audio (облако, без venv)
@@ -291,7 +288,6 @@ def check_available() -> bool  # опционально
 |-----------|--------|----------------|
 | `.venv-faster-whisper` | faster-whisper | при первом запуске Faster Whisper |
 | `.venv-whisperx` | whisperx, pyannote-audio, torch | при первом запуске WhisperX |
-| `.venv-qwen3` | qwen-tts, transformers, torch | при первом запуске Qwen3-TTS |
 | `.venv-omnivoice` | omnivoice, torch | при первом запуске OmniVoice |
 | `.venv-demucs` | demucs, torch | при первом разделении голоса |
 | `.venv-latentsync` | torch, diffusers, kornia, insightface | при первом запуске LatentSync |
@@ -328,8 +324,6 @@ LatentSync — модель синхронизации губ по аудио о
 
 | Движок | Тип | Клон голоса | Встроенные голоса |
 |--------|-----|-------------|-------------------|
-| Qwen3-TTS Base | Локально | Да (WAV референс) | Нет |
-| Qwen3-TTS CustomVoice | Локально | Нет | Vivian, Ryan, Aiden и др. |
 | Edge TTS | Облако (бесплатно) | Нет | 300+ голосов на всех языках |
 | ElevenLabs | Облако (API ключ) | Да (IVC, сохраняется) | Голоса из аккаунта |
 | Fish Audio | Облако (API ключ) | Да (модель, сохраняется) | 1.6M+ публичных моделей |
@@ -360,7 +354,6 @@ video-dub/
 │   └── lipsync/            # Плагины lip sync
 ├── .venv-faster-whisper/   # Faster Whisper (создаётся автоматически)
 ├── .venv-whisperx/         # WhisperX + pyannote
-├── .venv-qwen3/            # Qwen3-TTS
 ├── .venv-omnivoice/        # OmniVoice
 ├── .venv-demucs/           # Demucs
 ├── .venv-latentsync/       # LatentSync
