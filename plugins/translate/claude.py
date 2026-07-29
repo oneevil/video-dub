@@ -22,6 +22,29 @@ def list_models(api_key: str = "") -> list[dict]:
         return []
 
 
+_supports_effort = True   # сбрасывается, если модель не знает output_config
+
+
+def _create_message(client, model: str, prompt: str):
+    """Запрос к Claude. Перевод — механическая задача, размышления только жгут
+    бюджет max_tokens, поэтому просим минимальный effort. Старые модели этот
+    параметр не принимают — тогда повторяем без него и больше не пробуем."""
+    global _supports_effort
+    kwargs = {
+        "model": model,
+        "max_tokens": 16000,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if _supports_effort:
+        try:
+            return client.messages.create(output_config={"effort": "low"}, **kwargs)
+        except Exception as e:
+            if type(e).__name__ != "BadRequestError":
+                raise
+            _supports_effort = False
+    return client.messages.create(**kwargs)
+
+
 def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
               api_key: str = "", model: str = "", on_chunk=None, **kwargs) -> list[dict]:
     import anthropic
@@ -40,13 +63,15 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
         numbered = "\n".join(f"{sub['index']}|{sub['text']}" for sub in chunk)
         prompt = build_translate_prompt(numbered, target_lang)
 
-        resp = client.messages.create(
-            model=model,
-            max_tokens=16000,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        resp = _create_message(client, model, prompt)
         if resp.stop_reason == "refusal":
             raise RuntimeError("Claude отклонил запрос на перевод этого фрагмента")
+        if resp.stop_reason == "max_tokens":
+            # Иначе оборванный ответ молча оставил бы часть фраз без перевода
+            raise RuntimeError(
+                "Claude не уместил перевод в лимит ответа — часть фраз осталась бы "
+                "на исходном языке. Уменьшите размер фрагмента или смените модель."
+            )
         # В ответе кроме текста могут быть блоки thinking — берём только текстовые
         raw = "".join(b.text for b in resp.content if b.type == "text").strip()
         if not raw:
@@ -54,7 +79,7 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
                 f"Claude вернул пустой ответ (stop_reason={resp.stop_reason}). "
                 "Попробуйте уменьшить размер фрагмента или сменить модель."
             )
-        tr_map = parse_numbered_response(raw, chunk)
+        tr_map = parse_numbered_response(raw, chunk, log)
         chunk_translated = []
         for sub in chunk:
             t = {**sub, "text": tr_map.get(sub["index"], sub["text"])}

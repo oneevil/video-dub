@@ -56,10 +56,15 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
+            max_tokens=16000,   # 4096 не хватало на фрагмент из 50 фраз
         )
-        raw = resp.choices[0].message.content.strip()
-        tr_map = parse_numbered_response(raw, chunk)
+        if resp.choices[0].finish_reason == "length":
+            raise RuntimeError(
+                "OpenAI не уместил перевод в лимит ответа — часть фраз осталась бы "
+                "на исходном языке. Уменьшите размер фрагмента или смените модель."
+            )
+        raw = (resp.choices[0].message.content or "").strip()
+        tr_map = parse_numbered_response(raw, chunk, log)
         chunk_translated = []
         for sub in chunk:
             t = {**sub, "text": tr_map.get(sub["index"], sub["text"])}

@@ -34,7 +34,7 @@ def translate(subtitles: list[dict], target_lang: str, out_dir: str, log,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.choices[0].message.content.strip()
-        tr_map = parse_numbered_response(raw, chunk)
+        tr_map = parse_numbered_response(raw, chunk, log)
         chunk_translated = []
         for sub in chunk:
             t = {**sub, "text": tr_map.get(sub["index"], sub["text"])}
