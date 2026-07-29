@@ -25,7 +25,7 @@ function toggleModal() {
     const activeTab = document.querySelector('.modal-tab.active');
     if (activeTab) {
       if (activeTab.textContent.includes('Голоса')) loadVoicesList();
-      if (activeTab.textContent.includes('Модели')) { loadModels(); loadTtsModels(); }
+      if (activeTab.textContent.includes('Модели')) loadModels();
     }
   }
 }
@@ -36,7 +36,7 @@ function switchTab(tabId, el) {
   document.getElementById('tab-' + tabId).classList.add('active');
   el.classList.add('active');
   if (tabId === 'voices') loadVoicesList();
-  if (tabId === 'models') { loadModels(); loadTtsModels(); }
+  if (tabId === 'models') loadModels();
 }
 
 function toggleTheme() {
@@ -2789,51 +2789,61 @@ function downloadTtsModel() {
   });
 }
 
-function loadModels() {
-  const list = document.getElementById('modelsList');
-  list.innerHTML = 'Загрузка...';
-  fetch('/downloaded-models?category=whisper')
-    .then(r => r.json())
-    .then(data => {
-      if (!data.models.length) {
-        list.innerHTML = '<div style="color:var(--fg3);padding:8px 0">Нет загруженных моделей</div>';
-        return;
-      }
-      list.innerHTML = data.models.map(m => `
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-          <span style="font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--fg)">${m.name}</span>
-          <span style="color:var(--fg3);font-size:10px">${m.engine}</span>
-          <span style="color:var(--fg3);font-size:10px;margin-left:auto">${m.size}</span>
-          <button class="btn-delete-job" onclick="deleteModel('${m.path}','${m.name}',this)" style="opacity:1;padding:2px" title="Удалить">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
-      `).join('');
-    });
+// Группы в списке загруженных: порядок фиксированный, чтобы пустые не «прыгали»
+const MODEL_GROUPS = [
+  {key: 'whisper', label: 'Транскрипция', empty: 'Модель распознавания речи не загружена'},
+  {key: 'tts',     label: 'Озвучка (TTS)', empty: 'Модель синтеза речи не загружена'},
+  {key: 'other',   label: 'Остальное',     empty: 'Разделение дорожек и lip sync ничего не скачали'},
+];
+
+function _modelRow(m) {
+  return `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.name}</span>
+      <span style="color:var(--fg3);font-size:10px;white-space:nowrap">${m.engine || ''}</span>
+      <span style="color:var(--fg3);font-size:10px;margin-left:auto;white-space:nowrap">${m.size}</span>
+      <button class="btn-delete-job" onclick="deleteModel('${m.path}','${m.name}',this)" style="opacity:1;padding:2px;flex-shrink:0" title="Удалить">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>`;
 }
 
-function loadTtsModels() {
-  const list = document.getElementById('ttsModelsList');
+function loadModels() {
+  const list = document.getElementById('modelsList');
   if (!list) return;
   list.innerHTML = 'Загрузка...';
-  fetch('/downloaded-models?category=tts')
+  fetch('/downloaded-models')          // без category — нужны все группы, включая «остальное»
     .then(r => r.json())
     .then(data => {
-      if (!data.models.length) {
-        list.innerHTML = '<div style="color:var(--fg3);padding:8px 0">Нет загруженных моделей</div>';
-        return;
-      }
-      list.innerHTML = data.models.map(m => `
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-          <span style="font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--fg)">${m.name}</span>
-          <span style="color:var(--fg3);font-size:10px;margin-left:auto">${m.size}</span>
-          <button class="btn-delete-job" onclick="deleteModel('${m.path}','${m.name}',this,'tts')" style="opacity:1;padding:2px" title="Удалить">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
-      `).join('');
-    });
+      const models = data.models || [];
+      let totalMb = 0;
+      models.forEach(m => { totalMb += parseFloat(m.size) || 0; });
+
+      list.innerHTML = MODEL_GROUPS.map(g => {
+        const items = models.filter(m => (m.category || 'other') === g.key);
+        const groupMb = items.reduce((s, m) => s + (parseFloat(m.size) || 0), 0);
+        const head = `<div style="display:flex;align-items:baseline;gap:6px;margin:10px 0 2px">
+            <span style="font-size:11px;font-weight:600;color:var(--fg2)">${g.label}</span>
+            <span style="font-size:10px;color:var(--fg3);margin-left:auto">${
+              items.length ? `${items.length} · ${_fmtMb(groupMb)}` : '—'}</span>
+          </div>`;
+        const body = items.length
+          ? items.map(_modelRow).join('')
+          : `<div style="color:var(--fg3);padding:4px 0 6px;font-style:italic">${g.empty}</div>`;
+        return head + body;
+      }).join('') + `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);
+          display:flex;font-size:11px;color:var(--fg2)">
+          <span>Всего на диске</span><span style="margin-left:auto">${_fmtMb(totalMb)}</span></div>`;
+    })
+    .catch(() => { list.innerHTML = '<div style="color:var(--red)">Не удалось получить список моделей</div>'; });
 }
+
+function _fmtMb(mb) {
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+}
+
+// Списки объединены в один — оставляем имя для вызовов после скачивания TTS
+function loadTtsModels() { loadModels(); }
 
 function deleteModel(path, name, btn, category) {
   showConfirm('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>', 'Удалить модель?',
@@ -2848,8 +2858,7 @@ function deleteModel(path, name, btn, category) {
       .then(data => {
         if (data.error) return addLog('❌ ' + data.error, 'error');
         addLog('🗑️ Модель удалена');
-        if (category === 'tts') loadTtsModels();
-        else loadModels();
+        loadModels();
       });
     }
   );
