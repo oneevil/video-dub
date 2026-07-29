@@ -4,14 +4,9 @@ import sys
 import json
 import subprocess as _sp
 
+from pipeline import safe_cwd
+
 _VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
-
-
-def _safe_cwd():
-    """Не запускаем дочерние процессы из папки проекта: её модули
-    затеняют библиотеки. «/» на Windows — корень текущего диска."""
-    import tempfile
-    return tempfile.gettempdir()
 
 
 ENGINES = {"openai-whisper": "OpenAI Whisper (локально)"}
@@ -77,7 +72,7 @@ def download_model(engine, model, log_msg):
     yield f"data: {_json.dumps({'type': 'log', 'message': f'⬇️ Загружаю Whisper модель: {model}...'})}\n\n"
     _cd = cache_dir.replace('\\', '/')
     script = f"import whisper; whisper.load_model('{model}', download_root='{_cd}'); print('OK')"
-    result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600, cwd=_safe_cwd())
+    result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600, cwd=safe_cwd())
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -123,7 +118,7 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
     if source_language:
         cmd += ["--language", source_language]
 
-    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd())
+    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1, cwd=safe_cwd())
     from pipeline import drain_stderr, register_proc
     err_tail = drain_stderr(proc)
     register_proc(proc)   # для принудительной остановки

@@ -1281,8 +1281,8 @@ def delete_model():
     path = data.get("path", "")
     if not path or not os.path.exists(path):
         return jsonify(error="Модель не найдена"), 404
-    from pipeline import WHISPER_MODELS_DIR, TTS_MODELS_DIR, HF_CACHE_DIR
-    if not any(_is_within(path, d) for d in (WHISPER_MODELS_DIR, TTS_MODELS_DIR, HF_CACHE_DIR)):
+    from pipeline import WHISPER_MODELS_DIR, HF_CACHE_DIR
+    if not any(_is_within(path, d) for d in (WHISPER_MODELS_DIR, HF_CACHE_DIR)):
         return jsonify(error="Недопустимый путь"), 403
     from pipeline import rmtree_safe
     if os.path.isdir(path):
@@ -1856,22 +1856,16 @@ def _stale_tts_check(job: "Job", log):
     tts_dir = os.path.join(job.work_dir, "tts_audio")
     wavs = ([f for f in os.listdir(tts_dir) if f.endswith(".wav")]
             if os.path.isdir(tts_dir) else [])
-    if wavs and (saved != sig or (saved_voice and saved_voice != vsig)):
-        # Без сохранённого отпечатка (проекты до этой версии) судим по счёту:
-        # столько же файлов, сколько фраз — считаем, что они от этой разбивки.
-        voice_changed = bool(saved_voice) and saved_voice != vsig
-        stale = voice_changed or bool(saved) or len(wavs) != len(job.translated)
-        if stale:
-            prev = os.path.join(job.work_dir, "tts_audio_prev")
-            shutil.rmtree(prev, ignore_errors=True)
-            shutil.move(tts_dir, prev)
-            reason = ("Сменился голос озвучки" if voice_changed else
-                      f"Разбивка субтитров изменилась ({len(wavs)} сегментов → "
-                      f"{len(job.translated)} фраз)")
-            log(f"🧹 {reason}: старая озвучка убрана в tts_audio_prev, "
-                "речь будет синтезирована заново")
+    if wavs and (saved != sig or saved_voice != vsig):
+        prev = os.path.join(job.work_dir, "tts_audio_prev")
+        shutil.rmtree(prev, ignore_errors=True)
+        shutil.move(tts_dir, prev)
+        reason = ("Сменился голос озвучки" if saved_voice != vsig else
+                  f"Разбивка субтитров изменилась ({len(wavs)} сегментов → "
+                  f"{len(job.translated)} фраз)")
+        log(f"🧹 {reason}: старая озвучка убрана в tts_audio_prev, "
+            "речь будет синтезирована заново")
 
-    # Отпечатки пишем всегда — иначе следующий запуск не увидит смены
     meta["segments_signature"] = sig
     meta["voice_signature"] = vsig
     with open(meta_path, "w", encoding="utf-8") as mf:

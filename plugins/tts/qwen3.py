@@ -4,14 +4,9 @@ import json
 import sys
 import subprocess as _sp
 
+from pipeline import safe_cwd
+
 _VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
-
-
-def _safe_cwd():
-    """Не запускаем дочерние процессы из папки проекта: её модули
-    затеняют библиотеки. «/» на Windows — корень текущего диска."""
-    import tempfile
-    return tempfile.gettempdir()
 
 
 ENGINES = {
@@ -100,7 +95,7 @@ def download_model(engine, model, log_msg):
         f"Qwen3TTSModel.from_pretrained('{hf_model}'); print('OK')"
     )
     result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600,
-                     cwd=_safe_cwd(), env={**os.environ, "HF_HOME": HF_CACHE_DIR})
+                     cwd=safe_cwd(), env={**os.environ, "HF_HOME": HF_CACHE_DIR})
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -124,7 +119,7 @@ def _get_worker(log):
     _qwen3_proc = _sp.Popen(
         [python, worker, "--cache_dir", HF_CACHE_DIR],
         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
-        text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd()
+        text=True, encoding="utf-8", bufsize=1, cwd=safe_cwd()
     )
     # stderr обязательно вычитывать, иначе воркер зависнет на заполненной трубе
     from pipeline import drain_stderr, register_proc

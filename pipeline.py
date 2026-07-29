@@ -183,10 +183,6 @@ def set_cancel_scope(scope):
     _current_scope = scope
 
 
-def current_scope():
-    return _current_scope
-
-
 def check_cancelled():
     if _current_scope is not None:
         _current_scope.check()
@@ -261,37 +257,10 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 WHISPER_MODELS_DIR = os.path.join(MODELS_DIR, "whisper")
-TTS_MODELS_DIR = os.path.join(MODELS_DIR, "tts")
-os.makedirs(WHISPER_MODELS_DIR, exist_ok=True)
-
-# Кэш HuggingFace общий для всех движков: туда качаются не только TTS, но и
-# whisper/pyannote (whisperx), demucs, latentsync. Раньше HF_HOME указывал на
-# models/tts, поэтому в «папке TTS» оказывались чужие модели и служебный xet-кэш.
+# Кэш HuggingFace общий для всех движков: туда качаются и TTS-модели, и
+# whisper/pyannote (whisperx), demucs, latentsync
 HF_CACHE_DIR = os.path.join(MODELS_DIR, "hf")
 os.makedirs(HF_CACHE_DIR, exist_ok=True)
-
-
-def _migrate_hf_cache():
-    """Переносит кэш из models/tts (старое расположение), чтобы не качать заново."""
-    # всё это создаёт сам huggingface_hub, к TTS отношения не имеет
-    for name in ("hub", "xet", "modules", ".locks", "token", ".agent_harnesses.json"):
-        old = os.path.join(TTS_MODELS_DIR, name)
-        new = os.path.join(HF_CACHE_DIR, name)
-        if os.path.exists(old) and not os.path.exists(new):
-            try:
-                shutil.move(old, new)
-                print(f"  📦 Кэш HuggingFace перенесён: models/tts/{name} → models/hf/{name}")
-            except OSError as e:
-                print(f"  ⚠️ Не удалось перенести models/tts/{name}: {e}")
-    # models/tts больше не нужна: TTS-модели лежат в общем кэше HuggingFace
-    try:
-        if os.path.isdir(TTS_MODELS_DIR) and not os.listdir(TTS_MODELS_DIR):
-            os.rmdir(TTS_MODELS_DIR)
-    except OSError:
-        pass
-
-
-_migrate_hf_cache()
 os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
 
 LANGUAGES = {
@@ -542,19 +511,6 @@ def write_speaker_map(subtitles, path):
     mapping = {str(sub["index"]): sub.get("speaker", "") for sub in subtitles if sub.get("speaker")}
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(mapping, ensure_ascii=False, indent=2))
-
-
-def load_speaker_map(path, subtitles):
-    """Load speaker assignments into subtitle list."""
-    if not os.path.exists(path):
-        return subtitles
-    with open(path, encoding="utf-8") as f:
-        mapping = json.loads(f.read())
-    for sub in subtitles:
-        key = str(sub["index"])
-        if key in mapping:
-            sub["speaker"] = mapping[key]
-    return subtitles
 
 
 # ──────────────────────────────────────────────────────────────────────────────
