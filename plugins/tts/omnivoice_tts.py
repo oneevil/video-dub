@@ -32,8 +32,8 @@ def download_model(engine, model, log_msg):
         mark_venv_ready(OMNIVOICE_VENV)
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
     # 2. Check model
-    from pipeline import TTS_MODELS_DIR
-    tts_hub = os.path.join(TTS_MODELS_DIR, "hub")
+    from pipeline import HF_CACHE_DIR
+    tts_hub = os.path.join(HF_CACHE_DIR, "hub")
     if os.path.isdir(tts_hub) and any(d.startswith("models--") and "OmniVoice" in d for d in os.listdir(tts_hub)):
         yield f"data: {_json.dumps({'type': 'done', 'message': '✅ OmniVoice модель уже загружена'})}\n\n"
         return
@@ -41,7 +41,7 @@ def download_model(engine, model, log_msg):
     yield f"data: {_json.dumps({'type': 'log', 'message': '⬇️ Загружаю модель OmniVoice...'})}\n\n"
     dl_script = "from omnivoice import OmniVoice; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu'); print('OK')"
     result = _sp.run([python_path, "-c", dl_script], capture_output=True, text=True, encoding="utf-8", timeout=600,
-                     cwd=os.path.dirname(OMNIVOICE_VENV), env={**os.environ, "HF_HOME": TTS_MODELS_DIR})
+                     cwd=os.path.dirname(OMNIVOICE_VENV), env={**os.environ, "HF_HOME": HF_CACHE_DIR})
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -140,8 +140,8 @@ def _get_omnivoice_worker(log):
     # _stdin_lines в omnivoice_worker.py), это работает на всех ОС
     worker = os.path.join(os.path.dirname(__file__), "omnivoice_worker.py")
     python = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "python")
-    from pipeline import TTS_MODELS_DIR
-    cache_dir = TTS_MODELS_DIR
+    from pipeline import HF_CACHE_DIR
+    cache_dir = HF_CACHE_DIR
     os.makedirs(cache_dir, exist_ok=True)
 
     _omnivoice_proc = _sp.Popen(

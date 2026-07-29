@@ -1189,10 +1189,25 @@ def serve_tts_test_audio():
     return send_file(path, mimetype="audio/wav")
 
 
+def _classify_hf_model(name: str):
+    """Определяет назначение модели из кэша HuggingFace: (категория, движок)."""
+    low = name.lower()
+    if any(k in low for k in ("omnivoice", "-tts", "tts-", "higgs", "xtts", "vits")):
+        return "tts", "TTS"
+    if any(k in low for k in ("whisper", "wav2vec", "pyannote", "speaker-diarization",
+                              "segmentation", "nemo")):
+        return "whisper", "Транскрипция"
+    if any(k in low for k in ("demucs", "htdemucs")):
+        return "other", "Разделение дорожек"
+    if any(k in low for k in ("latentsync", "stable-diffusion", "sd-vae", "syncnet")):
+        return "other", "Lip sync"
+    return "other", "Прочее"
+
+
 @app.route("/downloaded-models")
 def list_downloaded_models():
     """List downloaded models, filterable by category (whisper or tts)."""
-    from pipeline import TTS_MODELS_DIR
+    from pipeline import HF_CACHE_DIR
     category = request.args.get("category", "")  # "whisper" or "tts"
     result = []
 
@@ -1211,27 +1226,29 @@ def list_downloaded_models():
         except Exception:
             pass
 
-    if category != "whisper":
-        # TTS models (HuggingFace hub inside tts dir)
-        tts_hub = os.path.join(TTS_MODELS_DIR, "hub")
-        if os.path.isdir(tts_hub):
-            for d in sorted(os.listdir(tts_hub)):
-                dp = os.path.join(tts_hub, d)
-                if os.path.isdir(dp) and d.startswith("models--") and ".lock" not in d:
-                    model_name = d.replace("models--", "").replace("--", "/")
-                    total = sum(
-                        os.path.getsize(os.path.join(root, f))
-                        for root, _, files in os.walk(dp) for f in files
-                    )
-                    size_mb = total / 1024 / 1024
-                    result.append({
-                        "name": model_name,
-                        "engine": "TTS",
-                        "file": d,
-                        "size": f"{size_mb:.0f} MB",
-                        "path": dp,
-                        "category": "tts",
-                    })
+    # Кэш HuggingFace общий для всех движков, поэтому раскладываем по назначению
+    hub = os.path.join(HF_CACHE_DIR, "hub")
+    if os.path.isdir(hub):
+        for d in sorted(os.listdir(hub)):
+            dp = os.path.join(hub, d)
+            if not (os.path.isdir(dp) and d.startswith("models--") and ".lock" not in d):
+                continue
+            model_name = d.replace("models--", "").replace("--", "/")
+            kind, engine = _classify_hf_model(model_name)
+            if category and category != kind:
+                continue
+            total = sum(
+                os.path.getsize(os.path.join(root, f))
+                for root, _, files in os.walk(dp) for f in files
+            )
+            result.append({
+                "name": model_name,
+                "engine": engine,
+                "file": d,
+                "size": f"{total / 1024 / 1024:.0f} MB",
+                "path": dp,
+                "category": kind,
+            })
 
     return jsonify(models=result)
 
@@ -1267,8 +1284,8 @@ def delete_model():
     path = data.get("path", "")
     if not path or not os.path.exists(path):
         return jsonify(error="Модель не найдена"), 404
-    from pipeline import WHISPER_MODELS_DIR, TTS_MODELS_DIR
-    if not (_is_within(path, WHISPER_MODELS_DIR) or _is_within(path, TTS_MODELS_DIR)):
+    from pipeline import WHISPER_MODELS_DIR, TTS_MODELS_DIR, HF_CACHE_DIR
+    if not any(_is_within(path, d) for d in (WHISPER_MODELS_DIR, TTS_MODELS_DIR, HF_CACHE_DIR)):
         return jsonify(error="Недопустимый путь"), 403
     from pipeline import rmtree_safe
     if os.path.isdir(path):

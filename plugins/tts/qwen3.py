@@ -86,8 +86,8 @@ def download_model(engine, model, log_msg):
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
 
     hf_model = MODELS.get(engine.replace("tts-", ""), "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    from pipeline import TTS_MODELS_DIR
-    tts_hub = os.path.join(TTS_MODELS_DIR, "hub")
+    from pipeline import HF_CACHE_DIR
+    tts_hub = os.path.join(HF_CACHE_DIR, "hub")
     model_dir_name = "models--" + hf_model.replace("/", "--")
     if os.path.isdir(os.path.join(tts_hub, model_dir_name)):
         yield f"data: {_json.dumps({'type': 'done', 'message': f'✅ {hf_model} уже загружена'})}\n\n"
@@ -100,7 +100,7 @@ def download_model(engine, model, log_msg):
         f"Qwen3TTSModel.from_pretrained('{hf_model}'); print('OK')"
     )
     result = _sp.run([python, "-c", script], capture_output=True, text=True, encoding="utf-8", timeout=600,
-                     cwd=_safe_cwd(), env={**os.environ, "HF_HOME": TTS_MODELS_DIR})
+                     cwd=_safe_cwd(), env={**os.environ, "HF_HOME": HF_CACHE_DIR})
     if result.returncode != 0 or "OK" not in result.stdout:
         err = result.stderr[:500] if result.stderr else result.stdout[:500]
         yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ {err}'})}\n\n"
@@ -119,10 +119,10 @@ def _get_worker(log):
 
     worker = os.path.join(os.path.dirname(__file__), "qwen3_worker.py")
     python = _get_python()
-    from pipeline import TTS_MODELS_DIR
+    from pipeline import HF_CACHE_DIR
 
     _qwen3_proc = _sp.Popen(
-        [python, worker, "--cache_dir", TTS_MODELS_DIR],
+        [python, worker, "--cache_dir", HF_CACHE_DIR],
         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
         text=True, encoding="utf-8", bufsize=1, cwd=_safe_cwd()
     )

@@ -237,8 +237,36 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 WHISPER_MODELS_DIR = os.path.join(MODELS_DIR, "whisper")
 TTS_MODELS_DIR = os.path.join(MODELS_DIR, "tts")
 os.makedirs(WHISPER_MODELS_DIR, exist_ok=True)
-os.makedirs(TTS_MODELS_DIR, exist_ok=True)
-os.environ.setdefault("HF_HOME", TTS_MODELS_DIR)
+
+# Кэш HuggingFace общий для всех движков: туда качаются не только TTS, но и
+# whisper/pyannote (whisperx), demucs, latentsync. Раньше HF_HOME указывал на
+# models/tts, поэтому в «папке TTS» оказывались чужие модели и служебный xet-кэш.
+HF_CACHE_DIR = os.path.join(MODELS_DIR, "hf")
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
+
+
+def _migrate_hf_cache():
+    """Переносит кэш из models/tts (старое расположение), чтобы не качать заново."""
+    # всё это создаёт сам huggingface_hub, к TTS отношения не имеет
+    for name in ("hub", "xet", "modules", ".locks", "token", ".agent_harnesses.json"):
+        old = os.path.join(TTS_MODELS_DIR, name)
+        new = os.path.join(HF_CACHE_DIR, name)
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                shutil.move(old, new)
+                print(f"  📦 Кэш HuggingFace перенесён: models/tts/{name} → models/hf/{name}")
+            except OSError as e:
+                print(f"  ⚠️ Не удалось перенести models/tts/{name}: {e}")
+    # models/tts больше не нужна: TTS-модели лежат в общем кэше HuggingFace
+    try:
+        if os.path.isdir(TTS_MODELS_DIR) and not os.listdir(TTS_MODELS_DIR):
+            os.rmdir(TTS_MODELS_DIR)
+    except OSError:
+        pass
+
+
+_migrate_hf_cache()
+os.environ.setdefault("HF_HOME", HF_CACHE_DIR)
 
 LANGUAGES = {
     "Русский":     "Russian",
