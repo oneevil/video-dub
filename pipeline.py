@@ -655,15 +655,14 @@ def separate_vocals(audio_path: str, out_dir: str, log) -> tuple[str, str]:
 
 
 def transcribe_audio(audio_path: str, out_dir: str, model_name: str, log,
-                      source_language: str = "", engine: str = "openai-whisper",
-                      api_key: str = "", num_speakers: int = 0,
-                      on_segment=None) -> list[dict]:
+                      source_language: str = "", engine: str = "faster-whisper",
+                      num_speakers: int = 0, on_segment=None) -> list[dict]:
     """Транскрибирует аудио через выбранный движок (plugin system)."""
     plugin = _TRANSCRIBE_PLUGINS.get(engine)
     if not plugin:
         raise ProcessingError(f"Транскрипция движок '{engine}' не найден")
     return plugin.transcribe(audio_path, out_dir, model_name, log,
-                             source_language=source_language, api_key=api_key,
+                             source_language=source_language,
                              num_speakers=num_speakers, on_segment=on_segment)
 
 

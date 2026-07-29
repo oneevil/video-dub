@@ -6,7 +6,7 @@
 
 - Скачивание видео по URL (yt-dlp) или загрузка локального файла
 - Разделение голоса и фона (demucs) — опционально
-- Транскрипция: OpenAI Whisper, Faster Whisper, WhisperX (с диаризацией), Whisper API, ElevenLabs Scribe
+- Транскрипция: Faster Whisper, WhisperX (с диаризацией) — локально, без облака
 - Перевод: Claude, OpenAI, Google Translate, Ollama, Custom OpenAI-совместимый API
 - Синтез речи: Qwen3-TTS Base/CustomVoice, Edge TTS, OmniVoice (600+ языков), ElevenLabs (облако), Fish Audio (облако), macOS Say
 - **Lip Sync**: LatentSync — синхронизация губ по аудио (CUDA, на CPU медленно)
@@ -152,7 +152,7 @@ uv run python setup_all.py
 
 | Переменная | Описание | По умолчанию |
 |-----------|----------|-------------|
-| `TRANSCRIBE_ENGINE` | Движок транскрипции | `openai-whisper` |
+| `TRANSCRIBE_ENGINE` | Движок транскрипции | `faster-whisper` |
 | `WHISPER_MODEL` | Модель Whisper | `large-v3` |
 | `SEPARATE_VOCALS` | Разделять голос и фон (demucs) | `true` |
 
@@ -217,12 +217,8 @@ uv run python setup_all.py
 plugins/
 ├── transcribe/                  # Движки транскрипции
 │   ├── __init__.py              # Авто-обнаружение плагинов
-│   ├── openai_whisper.py        # OpenAI Whisper (.venv-whisper)
-│   ├── openai_whisper_worker.py # Worker-процесс
-│   ├── faster_whisper.py        # Faster Whisper (.venv-faster-whisper)
+│   ├── faster_whisper_plugin.py # Faster Whisper (.venv-faster-whisper)
 │   ├── faster_whisper_worker.py # Worker-процесс
-│   ├── whisper_api.py           # OpenAI Whisper API (облако, без venv)
-│   ├── elevenlabs_stt.py        # ElevenLabs Scribe (облако, без venv)
 │   ├── whisperx_plugin.py       # WhisperX + диаризация (.venv-whisperx)
 │   └── whisperx_worker.py       # Worker-процесс
 ├── translate/                   # Провайдеры перевода (без отд. venv)
@@ -293,7 +289,6 @@ def check_available() -> bool  # опционально
 
 | Окружение | Пакеты | Когда создаётся |
 |-----------|--------|----------------|
-| `.venv-whisper` | openai-whisper, torch | при первом запуске OpenAI Whisper |
 | `.venv-faster-whisper` | faster-whisper | при первом запуске Faster Whisper |
 | `.venv-whisperx` | whisperx, pyannote-audio, torch | при первом запуске WhisperX |
 | `.venv-qwen3` | qwen-tts, transformers, torch | при первом запуске Qwen3-TTS |
@@ -363,8 +358,7 @@ video-dub/
 │   ├── translate/          # Плагины перевода
 │   ├── tts/                # Плагины TTS + workers
 │   └── lipsync/            # Плагины lip sync
-├── .venv-whisper/          # OpenAI Whisper (создаётся автоматически)
-├── .venv-faster-whisper/   # Faster Whisper
+├── .venv-faster-whisper/   # Faster Whisper (создаётся автоматически)
 ├── .venv-whisperx/         # WhisperX + pyannote
 ├── .venv-qwen3/            # Qwen3-TTS
 ├── .venv-omnivoice/        # OmniVoice
@@ -373,7 +367,6 @@ video-dub/
 ├── .latentsync/            # LatentSync репозиторий (клонируется автоматически)
 ├── models/
 │   ├── whisper/
-│   │   ├── openai/         # OpenAI Whisper модели (.pt)
 │   │   ├── faster-whisper/ # Faster Whisper модели
 │   │   └── whisperx/       # WhisperX + align + diarize модели
 │   ├── tts/

@@ -466,16 +466,45 @@ document.getElementById('language').addEventListener('change', () => {
 
 onTtsEngineChange();
 
+// Описания движков транскрипции — показываются под выпадающим списком
+const TRANSCRIBE_DESC = {
+  'faster-whisper':
+    '<span class="tag good">рекомендуется</span>Whisper large-v3 на движке CTranslate2: то же качество, ' +
+    'что у оригинала, но в 3–4 раза быстрее и экономнее по памяти. Режет тишину (VAD), поэтому меньше ' +
+    'выдумывает текст на паузах, и показывает фразы <b>прямо во время распознавания</b>. ' +
+    'Работает офлайн. Не различает говорящих.',
+  'whisperx':
+    '<span class="tag">несколько голосов</span>Тот же Whisper large-v3, но с двумя доп. проходами: ' +
+    'выравнивание по словам (wav2vec2) даёт <b>самые точные границы фраз</b>, а диаризация (pyannote) ' +
+    'помечает, кто говорит — только так работает озвучка разными голосами. Примерно вдвое медленнее, ' +
+    'требует <b>HuggingFace Token</b> и фразы появляются только в конце. Берите, если в видео 2+ человека.',
+};
+
+function _setEngineDesc(elId, engine) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const html = TRANSCRIBE_DESC[engine] || '';
+  el.innerHTML = html;
+  el.style.display = html ? '' : 'none';
+}
+
 function onEngineChange() {
   const eng = document.getElementById('transcribeEngine').value;
-  document.getElementById('whisperModelField').style.display =
-    (eng === 'whisper-api') ? 'none' : 'block';
   const isWhisperX = eng === 'whisperx';
   document.getElementById('numSpeakersField').style.display = isWhisperX ? '' : 'none';
   document.getElementById('hfTokenField').style.display = isWhisperX ? '' : 'none';
+  _setEngineDesc('transcribeEngineDesc', eng);
   persistSetting({transcribe_engine: eng});
 }
 onEngineChange();
+
+function onDownloadEngineChange() {
+  const eng = document.getElementById('downloadModelEngine').value;
+  document.getElementById('downloadModelName').style.display = '';
+  document.getElementById('whisperxExtraDownloads').style.display = eng === 'whisperx' ? '' : 'none';
+  _setEngineDesc('downloadEngineDesc', eng);
+}
+onDownloadEngineChange();
 
 // Background audio tracks synced with video
 let _bgAudio = null;     // no_vocals.wav

@@ -36,7 +36,6 @@ def _torch_index_args():
     return ["--extra-index-url", f"https://download.pytorch.org/whl/{tag}"]
 
 VENVS = {
-    ".venv-whisper": ["openai-whisper>=20250625", "torch>=2.8.0", "torchaudio>=2.8.0"],
     ".venv-faster-whisper": ["faster-whisper>=1.2.0"],
     ".venv-whisperx": ["whisperx>=3.8.0", "pyannote-audio>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0"],
     ".venv-qwen3": ["qwen-tts>=0.1.1", "transformers>=4.57.3", "torch>=2.8.0", "torchaudio>=2.8.0", "soundfile>=0.12.0", "numpy"],

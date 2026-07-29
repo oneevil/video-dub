@@ -178,7 +178,7 @@ def _prune_jobs():
 
 class Job:
     def __init__(self, url: str, language: str, whisper_model: str,
-                 source_language: str = "", transcribe_engine: str = "openai-whisper"):
+                 source_language: str = "", transcribe_engine: str = "faster-whisper"):
         self.id = uuid.uuid4().hex[:8]
         self.url = url
         self.language = language
@@ -434,7 +434,7 @@ def start():
     language = data.get("language", "Russian")
     source_language = data.get("source_language", "")
     whisper_model = data.get("whisper_model", DEFAULT_WHISPER_MODEL)
-    transcribe_engine = data.get("transcribe_engine", "openai-whisper")
+    transcribe_engine = data.get("transcribe_engine", DEFAULT_TRANSCRIBE_ENGINE)
 
     job = Job(url, language, whisper_model, source_language, transcribe_engine)
     job.project_name = data.get("project_name", "").strip()
@@ -995,9 +995,8 @@ def transcribe_voice():
     model = data.get("model", DEFAULT_WHISPER_MODEL)
     try:
         from pipeline import transcribe_audio as _ta
-        api_key = OPENAI_API_KEY if engine == "whisper-api" else ""
         subs = _ta(wav_path, os.path.dirname(wav_path), model,
-                    lambda msg: None, engine=engine, api_key=api_key)
+                    lambda msg: None, engine=engine)
         text = " ".join(s["text"] for s in subs)
         return jsonify(text=text)
     except Exception as e:
@@ -1254,7 +1253,7 @@ def list_downloaded_models():
 def download_model_route():
     """Download a whisper/TTS model in background, stream progress via SSE."""
     data = request.json
-    engine = data.get("engine", "openai-whisper")
+    engine = data.get("engine", DEFAULT_TRANSCRIBE_ENGINE)
     model = data.get("model", "")
     if not model:
         return jsonify(error="Укажите модель"), 400
@@ -1966,8 +1965,6 @@ def _run_pipeline(job: Job, api_key: str):
                 from pipeline import separate_vocals
                 vocals_path, _ = separate_vocals(audio_path, job.work_dir, log)
                 transcribe_path = vocals_path
-            # For whisper-api, need OpenAI key
-            _transcribe_key = OPENAI_API_KEY if job.transcribe_engine == "whisper-api" else ""
             def _on_transcribe_segment(sub):
                 check_cancelled()
                 _emit(job, "sub_add", sub=sub, mode="original")
@@ -1976,7 +1973,6 @@ def _run_pipeline(job: Job, api_key: str):
                 transcribe_path, job.work_dir, job.whisper_model, log,
                 source_language=job.source_language,
                 engine=job.transcribe_engine,
-                api_key=_transcribe_key,
                 num_speakers=job.num_speakers,
                 on_segment=_on_transcribe_segment,
             )

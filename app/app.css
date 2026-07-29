@@ -801,6 +801,21 @@ html.light .btn-start { box-shadow: 0 2px 8px rgba(5,150,105,.2); }
   display: block; font-size: 12px; font-weight: 500;
   color: var(--fg2); margin-bottom: 6px;
 }
+/* Пояснение под выпадающим списком: что за движок и когда его брать */
+.engine-desc {
+  font-size: 11px; line-height: 1.5; color: var(--fg3);
+  margin-top: 6px; padding: 8px 10px;
+  background: var(--bg3); border-left: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.engine-desc b { color: var(--fg2); font-weight: 600; }
+.engine-desc .tag {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  padding: 1px 6px; margin-right: 6px; border-radius: 10px;
+  background: var(--bg4); color: var(--fg2);
+}
+.engine-desc .tag.good { background: rgba(52,199,89,.15); color: #34c759; }
+.engine-desc .tag.warn { background: rgba(255,159,10,.15); color: #ff9f0a; }
 .modal-body input[type="text"], .modal-body select {
   width: 100%; padding: 10px 12px; font-size: 13px;
   font-family: 'Inter', sans-serif;
