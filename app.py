@@ -117,6 +117,7 @@ from pipeline import (
     transcribe_audio,
     translate_subtitles,
     write_srt,
+    ytdlp_cmd,
 )
 
 load_dotenv()
@@ -642,6 +643,9 @@ def download_video_route():
     project_name = (request.args.get("project_name") or "").strip()
     if not url:
         return jsonify(error="URL обязателен"), 400
+    ytdlp = ytdlp_cmd()
+    if ytdlp is None:
+        return jsonify(error="yt-dlp не найден — он нужен для скачивания по ссылке"), 400
 
     os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -651,7 +655,7 @@ def download_video_route():
 
     def stream():
         cmd = [
-            "yt-dlp", "--no-playlist", "--newline",
+            *ytdlp, "--no-playlist", "--newline",
             "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
             "-o", out_template,
@@ -1902,12 +1906,14 @@ def _run_pipeline(job: Job, api_key: str):
         def log(msg):
             _emit(job, "log", message=msg)
 
+        url = job.url
+        needs_download = url.startswith(("http://", "https://"))
+
         # 1. Dependencies
-        check_dependencies(log)
+        check_dependencies(log, need_ytdlp=needs_download)
 
         # ── Download ──
         _set_stage(job, "download")
-        url = job.url
         # Check if source already exists in work_dir (resume)
         existing_source = None
         for src in Path(job.work_dir).glob("source.*"):
@@ -1917,7 +1923,7 @@ def _run_pipeline(job: Job, api_key: str):
         if existing_source and not url:
             job.source_video = existing_source
             log(f"📁 Используется существующий файл: {Path(existing_source).name}")
-        elif url.startswith("http://") or url.startswith("https://"):
+        elif needs_download:
             video_path = download_video(url, job.work_dir, log)
             job.source_video = video_path
         else:

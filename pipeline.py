@@ -521,12 +521,32 @@ class ProcessingError(Exception):
     pass
 
 
-def check_dependencies(log):
-    """Проверяет наличие системных зависимостей."""
+def ytdlp_cmd():
+    """Как запускать yt-dlp, или None, если его нет.
+
+    Модулем надёжнее имени в PATH: пакет ставится в venv проекта, а его bin
+    попадает в PATH не при всяком способе запуска. Системный yt-dlp остаётся
+    запасным вариантом — он может быть свежее.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("yt_dlp"):
+        return [sys.executable, "-m", "yt_dlp"]
+    found = shutil.which("yt-dlp")
+    return [found] if found else None
+
+
+def check_dependencies(log, need_ytdlp=False):
+    """Проверяет наличие системных зависимостей.
+
+    yt-dlp спрашиваем только под скачивание по ссылке: для своего файла он не
+    нужен, а раньше его отсутствие роняло обработку на первом же шаге.
+    """
     missing = []
-    for tool in ["yt-dlp", "ffmpeg"]:
-        if not shutil.which(tool):
-            missing.append(tool)
+    if not shutil.which("ffmpeg"):
+        missing.append("ffmpeg")
+    if need_ytdlp and ytdlp_cmd() is None:
+        missing.append("yt-dlp")
     if missing:
         raise ProcessingError(
             "Не найдены зависимости:\n" + "\n".join(f"  • {m}" for m in missing)
@@ -538,8 +558,11 @@ def download_video(url: str, out_dir: str, log) -> str:
     """Скачивает видео через yt-dlp, возвращает путь к файлу."""
     log(f"⬇️  Скачиваю видео: {url}")
     out_template = os.path.join(out_dir, "source.%(ext)s")
+    ytdlp = ytdlp_cmd()
+    if ytdlp is None:
+        raise ProcessingError("yt-dlp не найден — он нужен для скачивания по ссылке")
     cmd = [
-        "yt-dlp",
+        *ytdlp,
         "--no-playlist",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
