@@ -6,7 +6,8 @@ Output: JSON lines to stdout (type: log/segment/result/error).
 
 Usage:
   python whisperx_worker.py --audio /path/to.wav --out_dir /path/ --model large-v3 \
-    --cache_dir ./models/whisper/whisperx [--language en] [--num_speakers 2] [--hf_token ...]
+    --cache_dir ./models/whisper/whisperx [--asr_cache_dir ./models/whisper/faster-whisper] \
+    [--language en] [--num_speakers 2] [--hf_token ...]
 """
 import argparse
 import json
@@ -24,6 +25,9 @@ def main():
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--model", default="large-v3")
     parser.add_argument("--cache_dir", default="")
+    # Модели распознавания общие с Faster Whisper — они лежат отдельно от
+    # моделей выравнивания и диаризации
+    parser.add_argument("--asr_cache_dir", default="")
     parser.add_argument("--language", default="")
     parser.add_argument("--num_speakers", type=int, default=0)
     parser.add_argument("--hf_token", default="")
@@ -55,6 +59,8 @@ def main():
 
     cache_dir = args.cache_dir
     os.makedirs(cache_dir, exist_ok=True)
+    asr_cache_dir = args.asr_cache_dir or cache_dir
+    os.makedirs(asr_cache_dir, exist_ok=True)
 
     # 1. Transcribe
     _out({"type": "log", "message": "   📝 Транскрипция..."})
@@ -64,7 +70,7 @@ def main():
     _prev_level = logging.root.level
     logging.root.setLevel(logging.CRITICAL)
     try:
-        model = whisperx.load_model(args.model, device, compute_type="int8", download_root=cache_dir)
+        model = whisperx.load_model(args.model, device, compute_type="int8", download_root=asr_cache_dir)
     finally:
         sys.stdout = _real_stdout
         sys.stderr = _real_stderr

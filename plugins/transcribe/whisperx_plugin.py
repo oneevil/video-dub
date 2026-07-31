@@ -34,8 +34,39 @@ _MAX_PY_MINOR = 13
 
 
 def _get_models_dir():
+    """Каталог моделей выравнивания (wav2vec2) и диаризации (pyannote)."""
     from pipeline import WHISPER_MODELS_DIR
     return os.path.join(WHISPER_MODELS_DIR, "whisperx")
+
+
+def _get_asr_dir():
+    """Каталог моделей распознавания — общий с Faster Whisper."""
+    from pipeline import WHISPER_ASR_DIR
+    return WHISPER_ASR_DIR
+
+
+def _migrate_asr_models():
+    """Убирает копии моделей распознавания, оставшиеся от прежней раскладки.
+
+    WhisperX качал их к себе, хотя внутри использует faster-whisper и берёт те
+    же репозитории Systran: на диске лежали две копии по несколько гигабайт.
+    """
+    old, new = _get_models_dir(), _get_asr_dir()
+    if not os.path.isdir(old):
+        return
+    import shutil as _shutil
+    for d in os.listdir(old):
+        if not (d.startswith("models--") and "faster-whisper" in d):
+            continue
+        src, dst = os.path.join(old, d), os.path.join(new, d)
+        if os.path.exists(dst):
+            _shutil.rmtree(src, ignore_errors=True)   # ровно та же модель уже в общем каталоге
+            continue
+        os.makedirs(new, exist_ok=True)
+        try:
+            os.replace(src, dst)
+        except OSError:      # разные файловые системы
+            _shutil.move(src, dst)
 
 
 def _get_python():
@@ -109,13 +140,16 @@ def download_model(engine, model, log_msg):
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
 
     if engine == "whisperx":
-        existing = [d for d in os.listdir(cache_dir)
-                    if d.startswith("models--") and model.replace("/", "--") in d.replace("models--", "")]
-        if existing:
-            yield f"data: {_json.dumps({'type': 'done', 'message': f'✅ WhisperX модель {model} уже загружена'})}\n\n"
+        # Модель распознавания общая с Faster Whisper — и ищем, и качаем туда же
+        _migrate_asr_models()
+        asr_dir = _get_asr_dir()
+        os.makedirs(asr_dir, exist_ok=True)
+        from plugins.transcribe.faster_whisper_plugin import find_model_dir
+        if find_model_dir(model):
+            yield f"data: {_json.dumps({'type': 'done', 'message': f'✅ Модель {model} уже загружена'})}\n\n"
             return
         yield f"data: {_json.dumps({'type': 'log', 'message': f'⬇️ Загружаю WhisperX модель: {model}...'})}\n\n"
-        _cd = cache_dir.replace('\\', '/')
+        _cd = asr_dir.replace('\\', '/')
         script = (
             f"import warnings; warnings.filterwarnings('ignore'); "
             f"import logging; logging.getLogger('pytorch_lightning').setLevel(logging.ERROR); "
@@ -181,6 +215,10 @@ def list_downloaded_models():
         return result
     for d in sorted(os.listdir(cache_dir)):
         dp = os.path.join(cache_dir, d)
+        # Модели распознавания перечисляет плагин Faster Whisper: каталог общий,
+        # и дважды показывать одно и то же в настройках незачем
+        if "faster-whisper" in d:
+            continue
         if os.path.isdir(dp) and d.startswith("models--") and ".lock" not in d:
             model_name = d.replace("models--", "").replace("--", "/")
             from pipeline import dir_size
@@ -209,6 +247,9 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
     python = _get_python()
     cache_dir = _get_models_dir()
     os.makedirs(cache_dir, exist_ok=True)
+    _migrate_asr_models()
+    asr_dir = _get_asr_dir()
+    os.makedirs(asr_dir, exist_ok=True)
 
     cmd = [
         python, worker,
@@ -216,6 +257,7 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
         "--out_dir", out_dir,
         "--model", model_name,
         "--cache_dir", cache_dir,
+        "--asr_cache_dir", asr_dir,
     ]
     if source_language:
         cmd += ["--language", source_language]

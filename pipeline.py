@@ -314,6 +314,10 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 WHISPER_MODELS_DIR = os.path.join(MODELS_DIR, "whisper")
+# Модели распознавания общие для Faster Whisper и WhisperX: второй внутри
+# использует первый и тянет ровно те же репозитории Systran. Раздельные
+# каталоги означали две копии по 4,5 ГБ.
+WHISPER_ASR_DIR = os.path.join(WHISPER_MODELS_DIR, "faster-whisper")
 # Кэш HuggingFace общий для всех движков: туда качаются и TTS-модели, и
 # whisper/pyannote (whisperx), demucs, latentsync
 HF_CACHE_DIR = os.path.join(MODELS_DIR, "hf")

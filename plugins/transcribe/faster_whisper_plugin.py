@@ -28,8 +28,38 @@ _CUDA_DEPS = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
 
 
 def _get_models_dir():
-    from pipeline import WHISPER_MODELS_DIR
-    return os.path.join(WHISPER_MODELS_DIR, "faster-whisper")
+    from pipeline import WHISPER_ASR_DIR
+    return WHISPER_ASR_DIR
+
+
+# «turbo» faster-whisper тянет из репозитория с другим именем, остальные модели
+# называются одинаково
+_REPO_SUFFIX = {"turbo": "large-v3-turbo-ct2"}
+
+
+def find_model_dir(model: str):
+    """Каталог HF-кеша с этой моделью, если она уже скачана.
+
+    Кеш лежит не по имени модели, а по имени репозитория
+    (models--Systran--faster-whisper-large-v3), поэтому простой проверки
+    существования каталога недостаточно.
+    """
+    cache_dir = _get_models_dir()
+    if not os.path.isdir(cache_dir):
+        return None
+    want = _REPO_SUFFIX.get(model, model)
+    for d in os.listdir(cache_dir):
+        if not d.startswith("models--") or "faster-whisper-" not in d:
+            continue
+        # Точное совпадение хвоста: иначе large-v3 нашёлся бы в large-v3-turbo
+        if d.split("faster-whisper-", 1)[1] == want:
+            return os.path.join(cache_dir, d)
+    return None
+
+
+def pretty_model_name(dirname: str) -> str:
+    """models--Systran--faster-whisper-large-v3 → Systran/faster-whisper-large-v3"""
+    return dirname.replace("models--", "").replace("--", "/")
 
 
 def _get_python():
@@ -121,7 +151,7 @@ def download_model(engine, model, log_msg):
 
     cache_dir = _get_models_dir()
     os.makedirs(cache_dir, exist_ok=True)
-    if os.path.isdir(os.path.join(cache_dir, model)):
+    if find_model_dir(model):
         yield f"data: {_json.dumps({'type': 'done', 'message': f'✅ Модель {model} уже загружена'})}\n\n"
         return
     yield f"data: {_json.dumps({'type': 'log', 'message': f'⬇️ Загружаю Faster Whisper модель: {model}...'})}\n\n"
@@ -142,13 +172,14 @@ def list_downloaded_models():
         return result
     for d in sorted(os.listdir(cache_dir)):
         dp = os.path.join(cache_dir, d)
-        if os.path.isdir(dp) and ".lock" not in d:
+        if os.path.isdir(dp) and d.startswith("models--") and ".lock" not in d:
             from pipeline import dir_size
             total = dir_size(dp)
             size_mb = total / 1024 / 1024
             result.append({
-                "name": d,
-                "engine": "Faster Whisper",
+                "name": pretty_model_name(d),
+                # Каталог общий: эти же файлы использует и WhisperX
+                "engine": "Faster Whisper / WhisperX",
                 "file": d,
                 "size": f"{size_mb:.0f} MB",
                 "path": dp,
