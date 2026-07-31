@@ -688,6 +688,21 @@ document.getElementById('customApiKey').addEventListener('blur', function() {
 
 /* ── Video Upload ────────────────────────────────── */
 
+// Загрузка переживает смену проекта: без ссылки на запрос уже ненужный ответ
+// пришёл бы в закрытый или в чужой проект и подменил в нём исходное видео.
+let _videoUploadXhr = null;
+
+/** Поле локального файла не привязано к проекту — сбрасываем его руками. */
+function _resetVideoUpload() {
+  if (_videoUploadXhr) { _videoUploadXhr.abort(); _videoUploadXhr = null; }
+  document.getElementById('uploadVideoArea').classList.remove('loaded', 'uploading');
+  document.getElementById('uploadVideoLabel').textContent = 'Нажмите для выбора видео';
+  document.getElementById('uploadPct').textContent = '0%';
+  document.getElementById('uploadProgressBar').style.width = '0%';
+  // Без сброса value повторный выбор того же файла не даст события change
+  document.getElementById('uploadVideo').value = '';
+}
+
 document.getElementById('uploadVideo').addEventListener('change', function() {
   if (!this.files[0]) return;
   const area = document.getElementById('uploadVideoArea');
@@ -707,6 +722,7 @@ document.getElementById('uploadVideo').addEventListener('change', function() {
   bar.style.width = '0%';
 
   const xhr = new XMLHttpRequest();
+  _videoUploadXhr = xhr;
   xhr.open('POST', '/upload-video');
 
   xhr.upload.onprogress = (e) => {
@@ -718,6 +734,7 @@ document.getElementById('uploadVideo').addEventListener('change', function() {
   };
 
   xhr.onload = () => {
+    _videoUploadXhr = null;
     area.classList.remove('uploading');
     if (xhr.status !== 200) {
       addLog('❌ Ошибка загрузки', 'error');
@@ -740,6 +757,7 @@ document.getElementById('uploadVideo').addEventListener('change', function() {
   };
 
   xhr.onerror = () => {
+    _videoUploadXhr = null;
     area.classList.remove('uploading');
     label.textContent = 'Нажмите для выбора видео';
     addLog('❌ Ошибка сети при загрузке', 'error');
@@ -980,6 +998,7 @@ function closeProject() {
   hasTranslation = false;
   document.getElementById('url').value = '';
   document.getElementById('projectName').value = '';
+  _resetVideoUpload();
   document.getElementById('subsList').innerHTML =
     '<div class="subs-empty"><div class="subs-empty-icon">T</div>Субтитры появятся после транскрипции или загрузки .srt файла</div>';
   document.getElementById('subsCount').textContent = '';
@@ -1035,6 +1054,7 @@ function closeProject() {
 function resumeJob(path, el) {
   // Reset state from previous project before loading new one
   _stopBgAudio();
+  _resetVideoUpload();
   subtitles = [];
   originalSubs = [];
   uploadedOriginal = null;
