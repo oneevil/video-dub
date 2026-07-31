@@ -56,6 +56,44 @@ def venv_ready(venv_path: str) -> bool:
             and os.path.exists(venv_python(venv_path)))
 
 
+def base_python(max_minor: int, log=None) -> str:
+    """Интерпретатор для изолированного окружения с потолком версии Python.
+
+    Приложение живёт на самом свежем Python, а библиотеки за ним не поспевают:
+    whisperx, например, требует <3.14. Окружение из sys.executable в этом случае
+    бесполезно — pip отвергает все версии пакета, жалуясь на requires-python.
+
+    Ищем в порядке «меньше вмешательства»: текущий интерпретатор → уже
+    установленные версии → скачивание через uv.
+    """
+    if sys.version_info.minor <= max_minor:
+        return sys.executable
+
+    want = f"3.{max_minor}"
+    found = shutil.which(f"python{want}")
+    if found:
+        return found
+
+    uv = shutil.which("uv")
+    if uv:
+        r = subprocess.run([uv, "python", "find", want], capture_output=True, text=True, encoding="utf-8")
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+        if log:
+            log(f"   📦 Скачиваю Python {want} (нужен этой библиотеке)...")
+        if subprocess.run([uv, "python", "install", want], capture_output=True, text=True,
+                          encoding="utf-8").returncode == 0:
+            r = subprocess.run([uv, "python", "find", want], capture_output=True, text=True, encoding="utf-8")
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+
+    raise ProcessingError(
+        f"Нужен Python {want}: текущий {sys.version_info.major}.{sys.version_info.minor} "
+        f"эта библиотека не поддерживает.\n"
+        f"   Поставьте его вручную: uv python install {want}"
+    )
+
+
 def mark_venv_ready(venv_path: str):
     with open(os.path.join(venv_path, _VENV_MARKER), "w", encoding="utf-8") as f:
         f.write("ok\n")

@@ -28,6 +28,10 @@ _WHISPERX_DEPS = [
     "torchaudio>=2.8.0",
 ]
 
+# whisperx объявляет requires-python <3.14, поэтому на более новом интерпретаторе
+# pip отвергает вообще все версии пакета. Окружение строим на подходящем.
+_MAX_PY_MINOR = 13
+
 
 def _get_models_dir():
     from pipeline import WHISPER_MODELS_DIR
@@ -42,19 +46,33 @@ def _get_pip():
     return os.path.join(WHISPERX_VENV, _VENV_BIN, "pip")
 
 
+def _create_venv(python: str):
+    """Создаёт окружение с нуля.
+
+    Недостроенное окружение сносим: если прошлая попытка сорвалась на другой
+    версии Python, venv поверх неё оставит вперемешку старые и новые файлы.
+    """
+    import shutil as _shutil
+    _shutil.rmtree(WHISPERX_VENV, ignore_errors=True)
+    _sp.run([python, "-m", "venv", WHISPERX_VENV], check=True)
+
+
 def _setup_venv(log):
     """Create isolated venv for WhisperX if needed."""
     from pipeline import venv_ready, mark_venv_ready
     if venv_ready(WHISPERX_VENV):
         return
     log("   📦 Создаю изолированное окружение WhisperX...")
-    _sp.run([sys.executable, "-m", "venv", WHISPERX_VENV], check=True)
+    from pipeline import base_python
+    _create_venv(base_python(_MAX_PY_MINOR, log))
     log("   📦 Устанавливаю WhisperX + зависимости...")
     from pipeline import _torch_index_args
     result = _sp.run([_get_pip(), "install", "--quiet"] + _torch_index_args() + _WHISPERX_DEPS,
                      capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
-        raise RuntimeError(f"Ошибка установки WhisperX: {result.stderr[:500]}")
+        # Хвост, а не начало: pip кладёт причину в последние строки, а сверху
+        # перечисляет отброшенные версии — на 500 символах видно только их
+        raise RuntimeError(f"Ошибка установки WhisperX: {result.stderr.strip()[-500:]}")
     mark_venv_ready(WHISPERX_VENV)
     log("   ✅ WhisperX окружение готово")
 
@@ -70,13 +88,22 @@ def download_model(engine, model, log_msg):
     from pipeline import venv_ready, mark_venv_ready
     if not venv_ready(WHISPERX_VENV):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение WhisperX...'})}\n\n"
-        _sp.run([sys.executable, "-m", "venv", WHISPERX_VENV], check=True)
+        from pipeline import base_python
+        if sys.version_info.minor > _MAX_PY_MINOR:
+            yield f"data: {_json.dumps({'type': 'log', 'message': f'📦 Готовлю Python 3.{_MAX_PY_MINOR} — WhisperX не поддерживает 3.{sys.version_info.minor}...'})}\n\n"
+        try:
+            py = base_python(_MAX_PY_MINOR)
+        except Exception as e:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+        _create_venv(py)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
         from pipeline import _torch_index_args
         result = _sp.run([_get_pip(), "install"] + _torch_index_args() + _WHISPERX_DEPS,
                          capture_output=True, text=True, encoding="utf-8")
         if result.returncode != 0:
-            yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ Ошибка установки: {result.stderr[:500]}'})}\n\n"
+            # Хвост, а не начало: причина у pip в последних строках
+            yield f"data: {_json.dumps({'type': 'error', 'message': f'Ошибка установки: {result.stderr.strip()[-500:]}'})}\n\n"
             return
         mark_venv_ready(WHISPERX_VENV)
         yield f"data: {_json.dumps({'type': 'log', 'message': '✅ Окружение создано'})}\n\n"
