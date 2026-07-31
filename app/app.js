@@ -3213,13 +3213,16 @@ function loadAeSegments() {
     const grip = document.createElement('div');
     grip.className = 'ae-seg-grip';
     el.appendChild(grip);
-    // Color by speaker
+    // Color by speaker.
+    // Через переменные, а не инлайновым background: инлайн перебил бы класс
+    // .overflow, и сегмент с назначенным диктором не краснел бы
     const spk = sub.speaker || speakerMap[String(sub.index)];
     if (spk) {
       const spkNum = parseInt(spk.replace(/\D/g, '')) || 0;
       const clr = SPEAKER_COLORS[spkNum % SPEAKER_COLORS.length];
-      el.style.background = clr + '40';
-      el.style.borderColor = clr;
+      el.style.setProperty('--seg-bg', clr + '40');
+      el.style.setProperty('--seg-bg-hover', clr + '66');
+      el.style.setProperty('--seg-border', clr);
     }
 
     // Drag to move
@@ -3287,10 +3290,17 @@ function loadAeSegments() {
       document.body.style.cursor = 'ew-resize';
       document.body.style.userSelect = 'none';
 
+      // Дальше длины записи растягивать нечего: слот сверх неё — это тишина и
+      // зря потраченное видео. Если длительность неизвестна, потолка нет.
+      const maxW = audioDur ? Math.max(startW, audioDur * aePixelsPerSec) : Infinity;
+
       const onMove = ev => {
         const scrollDelta = (timeline ? timeline.scrollLeft : 0) - startScroll;
         // 4px — тот же минимум, что и при отрисовке блока
-        el.style.width = Math.max(4, startW + ev.clientX - startX + scrollDelta) + 'px';
+        const w = Math.min(maxW, Math.max(4, startW + ev.clientX - startX + scrollDelta));
+        el.style.width = w + 'px';
+        // Цвет меняем на ходу — видно, в какой момент голос перестал вылезать
+        el.classList.toggle('overflow', audioDur > w / aePixelsPerSec + 0.05);
       };
       const onUp = () => {
         el.classList.remove('resizing');
