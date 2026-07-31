@@ -1120,6 +1120,7 @@ def tts_test():
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
     tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
+    language = data.get("language", "")
 
     task_id = uuid.uuid4().hex[:8]
     q: queue.Queue = queue.Queue()
@@ -1138,7 +1139,7 @@ def tts_test():
                 [sub], tmp_dir, lambda msg: q.put({"event": "log", "data": {"message": msg}}),
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
-                seed=tts_seed, speed=tts_speed,
+                seed=tts_seed, speed=tts_speed, language=language,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -1399,10 +1400,23 @@ def tts_single():
 
     tts_seed = int(data.get("tts_seed", DEFAULT_TTS_SEED))
     tts_speed = float(data.get("tts_speed", DEFAULT_TTS_SPEED))
+    # Без явного языка модель угадывает его по тексту и может сменить голос —
+    # в общем прогоне язык передаётся, здесь его теряли
+    language = data.get("language", "")
+
     # Delete existing segment so it gets regenerated
     existing = os.path.join(work_dir, "tts_audio", f"seg_{index:04d}.wav")
+    new_seed = None
     if os.path.exists(existing):
         os.remove(existing)
+        if tts_seed >= 0:
+            # Сид фиксирован в настройках, а попытки внутри воркера смещают его
+            # на постоянную величину — повтор воспроизводит ровно тот же набор
+            # вариантов. Сегмент, где голос «уехал», так не исправить, сколько
+            # ни жми. Повторный запуск — просьба о другой попытке, а не о той же.
+            import random
+            tts_seed = random.randint(0, 2**31 - 1)
+            new_seed = tts_seed
 
     task_id = uuid.uuid4().hex[:8]
     q: queue.Queue = queue.Queue()
@@ -1415,11 +1429,13 @@ def tts_single():
         from pipeline import synthesize_speech
         sub = {"index": index, "text": text, "start": 0, "end": 0}
         try:
+            if new_seed is not None:
+                q.put({"event": "log", "data": {"message": f"   🎲 Новая попытка, сид {new_seed}"}})
             result = synthesize_speech(
                 [sub], work_dir, lambda msg: q.put({"event": "log", "data": {"message": msg}}),
                 engine=tts_engine, voice=tts_voice,
                 voice_wav=voice_wav, voice_text=voice_text,
-                seed=tts_seed, speed=tts_speed,
+                seed=tts_seed, speed=tts_speed, language=language,
             )
             audio_path = result[0].get("audio_path", "")
             q.put({"event": "done", "data": {"audio_path": audio_path}})
@@ -1558,13 +1574,8 @@ def delete_output():
     return jsonify(ok=True)
 
 
-@app.route("/tts-segments")
-def list_tts_segments():
-    """List existing TTS segment indices for a work dir."""
-    work_dir = request.args.get("work_dir", "")
-    tts_dir = os.path.join(work_dir, "tts_audio")
-    if not os.path.isdir(tts_dir):
-        return jsonify(segments=[])
+def _tts_indices(tts_dir: str) -> list[int]:
+    """Номера озвученных сегментов по именам файлов."""
     indices = []
     for f in os.listdir(tts_dir):
         if f.startswith("seg_") and f.endswith(".wav"):
@@ -1572,7 +1583,53 @@ def list_tts_segments():
                 indices.append(int(f[4:8]))
             except ValueError:
                 pass
-    return jsonify(segments=sorted(indices))
+    return sorted(indices)
+
+
+@app.route("/tts-segments")
+def list_tts_segments():
+    """List existing TTS segment indices for a work dir."""
+    work_dir = request.args.get("work_dir", "")
+    tts_dir = os.path.join(work_dir, "tts_audio")
+    if not os.path.isdir(tts_dir):
+        return jsonify(segments=[])
+    return jsonify(segments=_tts_indices(tts_dir))
+
+
+@app.route("/shift-tts-segments", methods=["POST"])
+def shift_tts_segments():
+    """Убирает озвучку удалённого субтитра и сдвигает следующие на номер вниз.
+
+    Файлы названы по номеру субтитра, а удаление перенумеровывает все
+    последующие. Без сдвига вся озвучка после удалённой фразы съезжает: под
+    каждым субтитром оказывается голос предыдущего.
+    """
+    data = request.json
+    work_dir = data.get("work_dir", "")
+    try:
+        index = int(data.get("index", 0))
+    except (TypeError, ValueError):
+        index = 0
+    if not work_dir or index <= 0:
+        return jsonify(error="work_dir и index обязательны"), 400
+    if not _is_within(work_dir, DEFAULT_OUTPUT_DIR):
+        return jsonify(error="Недопустимый путь"), 403
+
+    tts_dir = os.path.join(work_dir, "tts_audio")
+    if not os.path.isdir(tts_dir):
+        return jsonify(ok=True, segments=[])
+
+    removed = os.path.join(tts_dir, f"seg_{index:04d}.wav")
+    if os.path.exists(removed):
+        os.remove(removed)
+
+    # По возрастанию: место под очередной файл к этому моменту уже свободно
+    for n in _tts_indices(tts_dir):
+        if n <= index:
+            continue
+        os.replace(os.path.join(tts_dir, f"seg_{n:04d}.wav"),
+                   os.path.join(tts_dir, f"seg_{n - 1:04d}.wav"))
+    return jsonify(ok=True, segments=_tts_indices(tts_dir))
 
 
 @app.route("/delete-tts-segment", methods=["POST"])

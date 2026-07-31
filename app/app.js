@@ -1938,6 +1938,50 @@ let _ttsSeeking = false;       // suppress TTS creation during seek
 const _TTS_ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
 const _TTS_ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
 
+/**
+ * Сдвигает всё, что привязано к номеру субтитра, после удаления одного из них.
+ *
+ * Файлы озвучки называются по номеру, дикторы хранятся по нему же, а удаление
+ * перенумеровывает оставшиеся субтитры — без сдвига под каждой фразой после
+ * удалённой оказывается голос предыдущей.
+ */
+function _shiftIndexedState(removed) {
+  _stopTtsPreview();
+  ttsSegments = new Set([...ttsSegments]
+    .filter(n => n !== removed)
+    .map(n => n > removed ? n - 1 : n));
+
+  const shifted = {};
+  Object.entries(speakerMap).forEach(([k, v]) => {
+    const n = parseInt(k);
+    if (n === removed) return;
+    shifted[String(n > removed ? n - 1 : n)] = v;
+  });
+  speakerMap = shifted;
+
+  // У запущенного сейчас задания папка известна только как _jobWorkDir
+  const wd = resumeWorkDir || _jobWorkDir;
+  if (!wd) return;
+  fetch('/shift-tts-segments', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({work_dir: wd, index: removed})
+  })
+    .then(r => r.json())
+    .then(d => {
+      // Берём номера с диска, а не свои: сервер знает, что реально осталось
+      if (d.segments) ttsSegments = new Set(d.segments);
+      renderSubtitles();
+      loadAeSegments();
+    })
+    .catch(() => {});
+  fetch('/save-speaker-mapping', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({work_dir: wd, mapping: speakerMap, type: 'speaker_map'})
+  });
+}
+
 /** Кнопку ищем по id, а не по ссылке: список перерисовывается во время генерации. */
 function _ttsPlayBtnState(index, playing) {
   const b = document.getElementById(`tts-play-${index}`);
@@ -2067,10 +2111,13 @@ function renderSubtitles() {
       showConfirm('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>', 'Удалить субтитр?',
         `Субтитр #${sub.index}: <b>${text}${text.length >= 50 ? '...' : ''}</b>`,
         () => {
+          const removed = sub.index;
           if (subtitles.length > i) subtitles.splice(i, 1);
           if (originalSubs.length > i) originalSubs.splice(i, 1);
           subtitles.forEach((s, j) => s.index = j + 1);
           if (originalSubs.length) originalSubs.forEach((s, j) => s.index = j + 1);
+          // Всё, что привязано к номеру субтитра, нужно сдвинуть вместе с ним
+          _shiftIndexedState(removed);
           renderSubtitles();
           autoSaveSubs();
         }
@@ -2245,6 +2292,8 @@ function renderSubtitles() {
             tts_voice: ttsVoice,
             tts_seed: getTtsSeed(),
             tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
+            // без языка модель угадывает его по тексту и может сменить голос
+            language: document.getElementById('language').value,
           })
         })
         .then(r => r.json())
@@ -2619,7 +2668,9 @@ function testTtsVoice() {
   fetch('/tts-test', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(), tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0 })
+    body: JSON.stringify({ text, tts_engine: ttsEngine, tts_voice: ttsVoice, tts_seed: getTtsSeed(),
+      tts_speed: parseFloat(document.getElementById('ttsSpeed').value) || 1.0,
+      language: document.getElementById('language').value })
   })
   .then(r => r.json())
   .then(d => {
