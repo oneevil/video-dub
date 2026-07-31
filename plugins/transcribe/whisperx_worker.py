@@ -44,7 +44,11 @@ def main():
 
     if torch.cuda.is_available():
         device = "cuda"
-        _out({"type": "log", "message": "   Устройство: CUDA GPU"})
+        try:
+            card = torch.cuda.get_device_name(0)
+        except Exception:
+            card = ""
+        _out({"type": "log", "message": "   Устройство: cuda" + (f" — {card}" if card else "")})
     else:
         device = "cpu"
         _out({"type": "log", "message": "   Устройство: CPU"})

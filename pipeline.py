@@ -221,6 +221,25 @@ def run(cmd, **kwargs):
     return result
 
 
+def gpu_name() -> str:
+    """Название видеокарты или пустая строка, если её нет.
+
+    Через nvidia-smi, а не torch: спрашивать приходится и там, где torch не
+    установлен, а сам ответ нужен только для лога.
+    """
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return ""
+    try:
+        r = run([exe, "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, encoding="utf-8", timeout=5)
+    except Exception:
+        return ""
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    return r.stdout.strip().splitlines()[0].strip()
+
+
 def register_proc(proc):
     """Регистрирует внешне созданный процесс (TTS-воркеры, транскрипция)."""
     if _current_scope is not None:
@@ -642,7 +661,8 @@ def separate_vocals(audio_path: str, out_dir: str, log) -> tuple[str, str]:
         [python, "-c", "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu'))"],
         capture_output=True, text=True, encoding="utf-8")
     device = device_check.stdout.strip() if device_check.returncode == 0 else "cpu"
-    log(f"   Устройство: {device}")
+    name = gpu_name() if device == "cuda" else ""
+    log(f"   Устройство: {device}" + (f" — {name}" if name else ""))
 
     cmd = [
         python, "-m", "demucs",

@@ -211,7 +211,11 @@ def process(video_path: str, audio_path: str, out_path: str, log,
     """Run LatentSync lip sync on video+audio pair."""
     log("🎭 Синхронизация губ (LatentSync)...")
 
-    if not check_cuda():
+    if check_cuda():
+        from pipeline import gpu_name
+        name = gpu_name()
+        log("   Устройство: cuda" + (f" — {name}" if name else ""))
+    else:
         log("   ⚠️ CUDA не обнаружена. LatentSync работает только на NVIDIA GPU. На CPU будет крайне медленно.")
 
     setup(log)

@@ -175,6 +175,12 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
            "--cache_dir", cache_dir]
     if source_language:
         cmd += ["--language", source_language]
+    # Имя видеокарты спрашиваем здесь: в изолированном окружении воркера нет ни
+    # pipeline, ни torch, а машина всё равно та же самая
+    from pipeline import gpu_name
+    name = gpu_name()
+    if name:
+        cmd += ["--gpu_name", name]
 
     proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1,
                      cwd=safe_cwd(), env=_worker_env())

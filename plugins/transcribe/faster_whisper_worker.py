@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--model", default="large-v3")
     parser.add_argument("--cache_dir", default="")
     parser.add_argument("--language", default="")
+    parser.add_argument("--gpu_name", default="")
     args = parser.parse_args()
 
     from faster_whisper import WhisperModel
@@ -46,7 +47,10 @@ def main():
         # Реальное устройство, а не запрошенное: при device="auto" узнать его
         # иначе нельзя, а разница между GPU и CPU — это минуты против часа
         state["device"] = getattr(getattr(model, "model", None), "device", device)
-        _out({"type": "log", "message": f"   Устройство: {state['device']} (int8, оптимизированный)"})
+        where = state["device"]
+        if where == "cuda" and args.gpu_name:
+            where += f" — {args.gpu_name}"
+        _out({"type": "log", "message": f"   Устройство: {where} (int8, оптимизированный)"})
 
         segments_iter, _info = model.transcribe(args.audio, **opts)
         subtitles = []

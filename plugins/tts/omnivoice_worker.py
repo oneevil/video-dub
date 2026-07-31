@@ -120,9 +120,14 @@ def main():
     _omni_mod.fade_and_pad_audio = lambda audio, **kw: audio
 
     # Device detection
+    where = ""
     if torch.cuda.is_available():
         device = "cuda:0"
         dtype = torch.float16
+        try:
+            where = f" — {torch.cuda.get_device_name(0)}"
+        except Exception:
+            pass
     elif torch.backends.mps.is_available():
         device = "mps"
         dtype = torch.float16
@@ -130,7 +135,7 @@ def main():
         device = "cpu"
         dtype = torch.float32
 
-    _out({"type": "log", "message": f"📦 Загружаю OmniVoice ({device})..."})
+    _out({"type": "log", "message": f"📦 Загружаю OmniVoice ({device}{where})..."})
     _t0 = time.monotonic()
     # Веса на диске в float32. Просить device_map=mps вместе с dtype=float16
     # нельзя: каст выполняется поэлементно Metal-шейдером и занимает минуты
