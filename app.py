@@ -1586,14 +1586,33 @@ def _tts_indices(tts_dir: str) -> list[int]:
     return sorted(indices)
 
 
+def _wav_duration(path: str) -> float:
+    """Длительность .wav по заголовку — без ffprobe на каждый сегмент."""
+    import wave
+    try:
+        with wave.open(path, "rb") as w:
+            rate = w.getframerate()
+            return w.getnframes() / rate if rate else 0.0
+    except Exception:
+        return 0.0
+
+
 @app.route("/tts-segments")
 def list_tts_segments():
-    """List existing TTS segment indices for a work dir."""
+    """List existing TTS segment indices for a work dir.
+
+    Вместе с номерами отдаём длительность записи: в редакторе блок рисуется по
+    слоту субтитра, и без этой цифры не видно, что голос в слот не помещается
+    и будет обрезан при сборке.
+    """
     work_dir = request.args.get("work_dir", "")
     tts_dir = os.path.join(work_dir, "tts_audio")
     if not os.path.isdir(tts_dir):
-        return jsonify(segments=[])
-    return jsonify(segments=_tts_indices(tts_dir))
+        return jsonify(segments=[], durations={})
+    indices = _tts_indices(tts_dir)
+    durations = {str(n): round(_wav_duration(os.path.join(tts_dir, f"seg_{n:04d}.wav")), 3)
+                 for n in indices}
+    return jsonify(segments=indices, durations=durations)
 
 
 @app.route("/shift-tts-segments", methods=["POST"])

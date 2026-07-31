@@ -555,6 +555,18 @@ html.light .resume-item:hover { background: rgba(0,0,0,.04); }
 }
 .ae-segment:hover { background: rgba(16,185,129,.5); }
 .ae-segment.dragging { cursor: grabbing; opacity: .8; z-index: 10; }
+.ae-segment.resizing { opacity: .8; z-index: 10; }
+/* Голос длиннее слота — при сборке конец фразы обрежется */
+.ae-segment.overflow {
+  background: rgba(239,68,68,.3); border-color: var(--red);
+}
+.ae-segment.overflow:hover { background: rgba(239,68,68,.5); }
+.ae-seg-grip {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 6px;
+  cursor: ew-resize; background: var(--accent); opacity: 0;
+}
+.ae-segment:hover .ae-seg-grip { opacity: .7; }
+.ae-segment.overflow .ae-seg-grip { background: var(--red); opacity: .9; }
 .ae-playhead {
   position: absolute; top: 0; bottom: 0; width: 2px;
   background: var(--red); z-index: 5; pointer-events: none;

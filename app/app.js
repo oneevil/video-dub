@@ -1032,6 +1032,7 @@ function closeProject() {
   _jobWorkDir = '';
   _bgMissing = false;
   ttsSegments = new Set();
+  ttsDurations = {};
   aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
   document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
   document.getElementById('aeButtons').style.display = 'none';
@@ -1067,6 +1068,7 @@ function resumeJob(path, el) {
   _jobWorkDir = '';
   _bgMissing = false;
   ttsSegments = new Set();
+  ttsDurations = {};
   aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
   document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
   document.getElementById('aeButtons').style.display = 'none';
@@ -1929,6 +1931,7 @@ function startSubSync() {
 
 let ttsWorkDir = '';
 let ttsSegments = new Set();
+let ttsDurations = {};   // index -> реальная длина записи, секунды
 let ttsAudioEl = null;
 let ttsPlayingIdx = null;      // какой сегмент играет сейчас — переживает перерисовку списка
 let ttsSyncPlaying = new Map(); // index -> Audio
@@ -2005,6 +2008,7 @@ function loadTtsSegments(workDir, thenRender) {
     .then(r => r.json())
     .then(d => {
       ttsSegments = new Set(d.segments || []);
+      ttsDurations = d.durations || {};
       if (thenRender) renderSubtitles();
       // Lock TTS step if all segments exist
       const total = Math.max(subtitles.length, originalSubs.length);
@@ -3192,6 +3196,23 @@ function loadAeSegments() {
     el.style.width = width + 'px';
     el.textContent = sub.index;
     el.title = `#${sub.index}: ${sub.text?.substring(0, 40) || ''}`;
+
+    // Блок — это слот субтитра, а не длина записи. Если голос длиннее, при
+    // сборке он обрежется: помечаем такой сегмент и показываем нехватку.
+    const audioDur = ttsDurations[String(sub.index)] || 0;
+    const slotDur = sub.end - sub.start;
+    const overflow = audioDur > slotDur + 0.05 ? audioDur - slotDur : 0;
+    if (overflow) {
+      el.classList.add('overflow');
+      el.title += `\nГолос ${audioDur.toFixed(1)}с не влезает в ${slotDur.toFixed(1)}с — ` +
+                  `растяните правый край, иначе конец фразы будет обрезан`;
+    }
+
+    // Ручка растягивания: перенос влево слот не удлиняет, а обрезается голос
+    // именно по слоту — без неё нехватку места нечем исправить
+    const grip = document.createElement('div');
+    grip.className = 'ae-seg-grip';
+    el.appendChild(grip);
     // Color by speaker
     const spk = sub.speaker || speakerMap[String(sub.index)];
     if (spk) {
@@ -3245,8 +3266,46 @@ function loadAeSegments() {
         }
         autoSaveSubs();
         renderSubtitles();
+        loadAeSegments();     // пересчитать пометку «не влезает» под новый слот
         // Seek video to new segment position and reset TTS sync
         if (videoEl) videoEl.currentTime = sub.start;
+        stopTtsSync();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    // Растягивание правого края — меняет конец субтитра, то есть длину слота
+    grip.addEventListener('mousedown', e => {
+      e.preventDefault();
+      e.stopPropagation();   // иначе сработает перенос всего блока
+      const timeline = document.getElementById('aeTimeline');
+      const startX = e.clientX;
+      const startW = parseFloat(el.style.width);
+      const startScroll = timeline ? timeline.scrollLeft : 0;
+      el.classList.add('resizing');
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = ev => {
+        const scrollDelta = (timeline ? timeline.scrollLeft : 0) - startScroll;
+        // 4px — тот же минимум, что и при отрисовке блока
+        el.style.width = Math.max(4, startW + ev.clientX - startX + scrollDelta) + 'px';
+      };
+      const onUp = () => {
+        el.classList.remove('resizing');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+
+        const newEnd = Math.round((sub.start + parseFloat(el.style.width) / aePixelsPerSec) * 100) / 100;
+        sub.end = newEnd;
+        if (subtitles[i]) subtitles[i].end = newEnd;
+        if (originalSubs[i]) originalSubs[i].end = newEnd;
+        autoSaveSubs();
+        renderSubtitles();
+        loadAeSegments();
         stopTtsSync();
       };
       document.addEventListener('mousemove', onMove);
