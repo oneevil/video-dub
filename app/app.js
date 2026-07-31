@@ -1033,6 +1033,7 @@ function closeProject() {
   _bgMissing = false;
   ttsSegments = new Set();
   ttsDurations = {};
+  ttsVersions = {};
   aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
   document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
   document.getElementById('aeButtons').style.display = 'none';
@@ -1069,6 +1070,7 @@ function resumeJob(path, el) {
   _bgMissing = false;
   ttsSegments = new Set();
   ttsDurations = {};
+  ttsVersions = {};
   aeDuration = 0; aePixelsPerSec = 0; aeZoomLevel = 10; aeSegments = []; aePeaks = [];
   document.getElementById('audioEditor').innerHTML = '<div class="placeholder"><div class="placeholder-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div><span>Редактор появится после загрузки</span></div>';
   document.getElementById('aeButtons').style.display = 'none';
@@ -1874,9 +1876,7 @@ function startSubSync() {
 
       if (ttsSyncDone.has(idx)) continue;
 
-      const segFile = `seg_${String(idx).padStart(4,'0')}.wav`;
-      const url = `/tts-audio?path=${encodeURIComponent(ttsWorkDir + '/tts_audio/' + segFile)}`;
-      const audio = new Audio(url);
+      const audio = new Audio(ttsAudioUrl(idx));
       audio.preload = 'auto';
       let cancelled = false;
       const startOffset = videoOffset;
@@ -1932,6 +1932,14 @@ function startSubSync() {
 let ttsWorkDir = '';
 let ttsSegments = new Set();
 let ttsDurations = {};   // index -> реальная длина записи, секунды
+let ttsVersions = {};    // index -> метка времени файла, чтобы обойти кеш браузера
+
+/** Адрес записи сегмента с меткой версии: без неё браузер отдаёт старую. */
+function ttsAudioUrl(index) {
+  const segFile = `seg_${String(index).padStart(4, '0')}.wav`;
+  const path = encodeURIComponent(ttsWorkDir + '/tts_audio/' + segFile);
+  return `/tts-audio?path=${path}&v=${ttsVersions[String(index)] || 0}`;
+}
 let ttsAudioEl = null;
 let ttsPlayingIdx = null;      // какой сегмент играет сейчас — переживает перерисовку списка
 let ttsSyncPlaying = new Map(); // index -> Audio
@@ -2009,6 +2017,7 @@ function loadTtsSegments(workDir, thenRender) {
     .then(d => {
       ttsSegments = new Set(d.segments || []);
       ttsDurations = d.durations || {};
+      ttsVersions = d.versions || {};
       if (thenRender) renderSubtitles();
       // Lock TTS step if all segments exist
       const total = Math.max(subtitles.length, originalSubs.length);
@@ -2207,8 +2216,7 @@ function renderSubtitles() {
 
     // TTS play button (only if segment file exists)
     if (ttsWorkDir && sub.index && ttsSegments.has(sub.index)) {
-      const segFile = `seg_${String(sub.index).padStart(4,'0')}.wav`;
-      const audioUrl = `/tts-audio?path=${encodeURIComponent(ttsWorkDir + '/tts_audio/' + segFile)}`;
+      const audioUrl = ttsAudioUrl(sub.index);
       const play = document.createElement('button');
       play.className = 'btn-play-tts';
       play.id = `tts-play-${sub.index}`;
@@ -2311,10 +2319,11 @@ function renderSubtitles() {
             gen.innerHTML = _genSvg;
             addLog(`✅ TTS сегмент ${sub.index} сгенерирован`);
             ttsWorkDir = resumeWorkDir;
-            ttsSegments.add(sub.index);
             stopTtsSync();
-            renderSubtitles();
-            loadAeSegments();
+            // Перечитываем список целиком: у сегмента изменились и длина, и
+            // метка версии, а без них редактор покажет старое, а плеер сыграет
+            // прежнюю запись из кеша
+            loadTtsSegments(resumeWorkDir, true);
           });
           es.addEventListener('error', e => {
             es.close();

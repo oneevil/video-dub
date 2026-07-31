@@ -1610,9 +1610,19 @@ def list_tts_segments():
     if not os.path.isdir(tts_dir):
         return jsonify(segments=[], durations={})
     indices = _tts_indices(tts_dir)
-    durations = {str(n): round(_wav_duration(os.path.join(tts_dir, f"seg_{n:04d}.wav")), 3)
-                 for n in indices}
-    return jsonify(segments=indices, durations=durations)
+    durations, versions = {}, {}
+    for n in indices:
+        path = os.path.join(tts_dir, f"seg_{n:04d}.wav")
+        durations[str(n)] = round(_wav_duration(path), 3)
+        # Метка времени файла идёт в адрес запроса: без неё браузер продолжает
+        # играть прежнюю запись сегмента из своего кеша
+        try:
+            # В миллисекундах: две переозвучки внутри одной секунды дали бы
+            # одинаковую метку, и вторая снова пришла бы из кеша
+            versions[str(n)] = int(os.path.getmtime(path) * 1000)
+        except OSError:
+            versions[str(n)] = 0
+    return jsonify(segments=indices, durations=durations, versions=versions)
 
 
 @app.route("/shift-tts-segments", methods=["POST"])
