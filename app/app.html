@@ -170,12 +170,12 @@
               {% endfor %}
             </select>
           </div>
-        </div>
-        <div class="field" id="numSpeakersField" style="display:none">
-          <label>Количество голосов</label>
-          <div style="display:flex;align-items:center;gap:8px">
-            <input type="number" id="numSpeakers" min="0" max="10" value="0" style="width:70px">
-            <span style="font-size:10px;color:var(--fg3)">0 = авто</span>
+          <!-- Появляется только у WhisperX. Ширина фиксированная: языкам нужно
+               место под названия, а сюда вводят одну цифру -->
+          <div class="field" id="numSpeakersField" style="display:none;flex:0 0 92px">
+            <label title="0 — определить автоматически">Голосов</label>
+            <input type="number" id="numSpeakers" min="0" max="10" value="0"
+                   title="0 — определить автоматически">
           </div>
         </div>
         <div class="field">
