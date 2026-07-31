@@ -139,6 +139,25 @@ body {
   display: block; font-size: 12px; font-weight: 500;
   color: var(--fg2); margin-bottom: 6px;
 }
+/* Поля в ряд: перенос заголовка на вторую строку опустил бы это поле ниже
+   соседних, поэтому запрещаем его и ужимаем шрифт под узкую колонку */
+.field-row { display: flex; gap: 12px; }
+/* min-width:0 — иначе колонка не сожмётся уже своего содержимого и ряд
+   вылезет за панель вместо того, чтобы поделиться шириной */
+.field-row .field { min-width: 0; }
+.field-row .field label {
+  font-size: 11px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* Где содержимое не помещается — узкая колонка ряда или длинные подписи
+   вариантов — уменьшаем текст и боковые отступы, включая место под стрелку.
+   Отступы важнее шрифта: в колонке 99px на них уходила почти половина ширины */
+.field-row select, .field-row input, select.compact, input.compact {
+  font-size: 12px; padding: 9px 10px;
+}
+.field-row select, select.compact {
+  padding-right: 28px; background-position: right 9px center;
+}
 
 input[type="text"], input[type="number"], select {
   width: 100%; padding: 10px 12px; font-size: 13px;

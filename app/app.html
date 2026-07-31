@@ -152,7 +152,7 @@
       <!-- Params -->
       <div style="margin-top:16px">
         <div class="section-label">Параметры</div>
-        <div style="display:flex;gap:12px">
+        <div class="field-row">
           <div class="field" style="flex:1">
             <label>Язык оригинала</label>
             <select id="sourceLanguage">
@@ -172,7 +172,7 @@
           </div>
           <!-- Появляется только у WhisperX. Ширина фиксированная: языкам нужно
                место под названия, а сюда вводят одну цифру -->
-          <div class="field" id="numSpeakersField" style="display:none;flex:0 0 92px">
+          <div class="field" id="numSpeakersField" style="display:none;flex:0 0 78px">
             <label title="0 — определить автоматически">Голосов</label>
             <input type="number" id="numSpeakers" min="0" max="10" value="0"
                    title="0 — определить автоматически">
@@ -180,7 +180,7 @@
         </div>
         <div class="field">
           <label>Оригинальное аудио</label>
-          <select id="buildOriginalAudio" onchange="onOriginalAudioChange();persistSetting({build_original_audio: this.value})">
+          <select id="buildOriginalAudio" class="compact" onchange="onOriginalAudioChange();persistSetting({build_original_audio: this.value})">
             <option value="none" {{ 'selected' if default_build_original_audio == 'none' else '' }}>Без оригинального аудио</option>
             <option value="full" {{ 'selected' if default_build_original_audio == 'full' else '' }}>Полное аудио (фоном, приглушённое)</option>
             <option value="no_vocals" {{ 'selected' if default_build_original_audio == 'no_vocals' else '' }}>Только фон без голоса (demucs)</option>
