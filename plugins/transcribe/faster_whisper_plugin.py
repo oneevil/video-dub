@@ -1,5 +1,7 @@
 """Faster Whisper plugin -- optimized CTranslate2 transcription (isolated venv)."""
+import glob
 import os
+import shutil
 import sys
 import json
 import subprocess as _sp
@@ -19,6 +21,11 @@ FASTER_WHISPER_VENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirna
 
 _DEPS = ["faster-whisper>=1.2.0"]
 
+# CTranslate2 не тянет CUDA за собой и на видеокарте падает с
+# «libcublas.so.12 is not found». В отличие от whisperx, который получает эти
+# библиотеки бесплатно вместе с torch, здесь их приходится ставить руками.
+_CUDA_DEPS = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
+
 
 def _get_models_dir():
     from pipeline import WHISPER_MODELS_DIR
@@ -27,6 +34,58 @@ def _get_models_dir():
 
 def _get_python():
     return os.path.join(FASTER_WHISPER_VENV, _VENV_BIN, "python")
+
+
+def _has_nvidia_gpu() -> bool:
+    """Есть ли видеокарта. Библиотеки CUDA весят около гигабайта, так что на
+    машине без неё их качать незачем."""
+    return sys.platform != "darwin" and shutil.which("nvidia-smi") is not None
+
+
+def _nvidia_lib_dirs() -> list[str]:
+    """Каталоги с libcublas/libcudnn внутри venv — пакеты nvidia-*-cu12."""
+    if sys.platform == "win32":
+        site_packages = [os.path.join(FASTER_WHISPER_VENV, "Lib", "site-packages")]
+        sub = "bin"
+    else:
+        site_packages = glob.glob(os.path.join(FASTER_WHISPER_VENV, "lib", "python3.*", "site-packages"))
+        sub = "lib"
+    dirs = []
+    for sp in site_packages:
+        dirs += sorted(glob.glob(os.path.join(sp, "nvidia", "*", sub)))
+    return dirs
+
+
+def _worker_env():
+    """Окружение воркера с путём к CUDA-библиотекам.
+
+    Задать его нужно именно дочернему процессу: динамический загрузчик читает
+    LD_LIBRARY_PATH один раз при старте, менять его изнутри уже поздно.
+    """
+    dirs = _nvidia_lib_dirs()
+    if not dirs:
+        return None
+    env = os.environ.copy()
+    key = "PATH" if sys.platform == "win32" else "LD_LIBRARY_PATH"
+    env[key] = os.pathsep.join(dirs + ([env[key]] if env.get(key) else []))
+    return env
+
+
+def _ensure_cuda_libs(log):
+    """Доставляет CUDA-библиотеки в уже созданное окружение.
+
+    Проверяем отдельно от venv_ready: у тех, кто ставил Faster Whisper раньше,
+    окружение помечено готовым, но библиотек в нём нет.
+    """
+    if not _has_nvidia_gpu() or _nvidia_lib_dirs():
+        return
+    log("   📦 Доустанавливаю библиотеки CUDA (около 1 ГБ, один раз)...")
+    r = _sp.run([os.path.join(FASTER_WHISPER_VENV, _VENV_BIN, "pip"), "install", "--quiet"] + _CUDA_DEPS,
+                capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        log(f"   ⚠️ Не удалось поставить CUDA-библиотеки, останусь на процессоре: {r.stderr[:200]}")
+    else:
+        log("   ✅ Библиотеки CUDA готовы")
 
 
 def _setup_venv(log):
@@ -104,6 +163,7 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
     log(f"🎙️ Транскрибирую — Faster Whisper (модель: {model_name}{lang_msg})...")
 
     _setup_venv(log)
+    _ensure_cuda_libs(log)
 
     worker = os.path.join(os.path.dirname(__file__), "faster_whisper_worker.py")
     cache_dir = _get_models_dir()
@@ -116,7 +176,8 @@ def transcribe(audio_path: str, out_dir: str, model_name: str, log,
     if source_language:
         cmd += ["--language", source_language]
 
-    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1, cwd=safe_cwd())
+    proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", bufsize=1,
+                     cwd=safe_cwd(), env=_worker_env())
     from pipeline import drain_stderr, register_proc
     err_tail = drain_stderr(proc)
     register_proc(proc)   # для принудительной остановки
