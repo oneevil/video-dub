@@ -11,18 +11,54 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # иначе Invoke-WebRequest тормозит на прогресс-баре
 
-$AppDir     = Split-Path -Parent $PSScriptRoot
+function Say  ($m) { Write-Host "> $m"  -ForegroundColor Cyan }
+function Ok   ($m) { Write-Host "+ $m"  -ForegroundColor Green }
+function Warn ($m) { Write-Host "! $m"  -ForegroundColor Yellow }
+function Die  ($m) { Write-Host "x $m"  -ForegroundColor Red; Read-Host "`nEnter для выхода"; exit 1 }
+
+# Приложение создаёт venv'ы, качает модели и пишет .env рядом с кодом. В
+# Program Files это доступно только администратору, поэтому если папка не
+# пишется — переносим код в профиль и работаем оттуда. Так же устроена сборка
+# для macOS: бандл там неизменяемый шаблон.
+function Get-WorkDir ($bundle) {
+    $probe = Join-Path $bundle ('.write-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType File -Path $probe -ErrorAction Stop | Out-Null
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        return $bundle
+    } catch { }
+
+    $target = Join-Path $env:LOCALAPPDATA 'Video-Dub'
+    Say "Папка установки только для чтения — работаю в $target"
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+
+    # /E, а не /MIR: зеркало удалило бы из профиля окружения, модели и проекты.
+    # Исключения на случай, если в папке установки они всё же появились —
+    # копировать оттуда гигабайты незачем.
+    # Не $args: это встроенная переменная PowerShell со списком аргументов функции
+    $rcArgs = @($bundle, $target, '/E', '/NJH', '/NJS', '/NP', '/NDL', '/NFL',
+                '/XD', 'voices', 'runtime', 'models', 'projects', '.venv', '.venv-faster-whisper',
+                '.venv-whisperx', '.venv-omnivoice', '.venv-demucs', '.venv-latentsync', '.latentsync',
+                '/XF', '.env')
+    $rc = Start-Process robocopy -ArgumentList $rcArgs -NoNewWindow -Wait -PassThru
+    # У robocopy успех — это код меньше 8; 1 означает «файлы скопированы»
+    if ($rc.ExitCode -ge 8) { Die "не удалось скопировать приложение в $target (robocopy $($rc.ExitCode))" }
+
+    # Голоса кладём только при первой установке: дальше это папка пользователя
+    $voices = Join-Path $target 'voices'
+    if (-not (Test-Path $voices)) {
+        Copy-Item (Join-Path $bundle 'voices') $voices -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $target
+}
+
+$AppDir     = Get-WorkDir (Split-Path -Parent $PSScriptRoot)
 $RuntimeDir = Join-Path $AppDir 'runtime'
 $RuntimeBin = Join-Path $RuntimeDir 'bin'
 $Port       = if ($env:PORT) { $env:PORT } else { '5050' }
 
 New-Item -ItemType Directory -Force -Path $RuntimeBin | Out-Null
 $env:PATH = "$RuntimeBin;$env:PATH"
-
-function Say  ($m) { Write-Host "> $m"  -ForegroundColor Cyan }
-function Ok   ($m) { Write-Host "+ $m"  -ForegroundColor Green }
-function Warn ($m) { Write-Host "! $m"  -ForegroundColor Yellow }
-function Die  ($m) { Write-Host "x $m"  -ForegroundColor Red; Read-Host "`nEnter для выхода"; exit 1 }
 
 function Ensure-Uv {
     if (Get-Command uv -ErrorAction SilentlyContinue) {

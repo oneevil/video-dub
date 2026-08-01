@@ -28,8 +28,13 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=icon.ico
-; Ставим в Program Files → нужны права администратора
-PrivilegesRequired=admin
+; Установка в профиль пользователя, без прав администратора: приложение создаёт
+; venv'ы и качает модели рядом с кодом, а в Program Files писать нельзя.
+; При lowest {autopf} — это %LOCALAPPDATA%\Programs.
+PrivilegesRequired=lowest
+; Иначе поверх прежней установки Inno снова запросил бы права и вернул нас
+; в Program Files
+UsePreviousPrivileges=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
