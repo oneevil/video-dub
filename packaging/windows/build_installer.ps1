@@ -1,4 +1,4 @@
-# Собирает установщик Video-Dub для Windows.
+﻿# Собирает установщик Video-Dub для Windows.
 #
 # Требуется Inno Setup 6 (winget install JRSoftware.InnoSetup).
 # Использование:  .\packaging\windows\build_installer.ps1 -Version 0.1.0
