@@ -10,6 +10,9 @@ ENGINES = {"omnivoice": "OmniVoice (600+ языков, клон голоса)"}
 
 DOWNLOAD_ENGINES = [{"value": "tts-omnivoice", "label": "OmniVoice"}]
 
+_OMNIVOICE_DEPS = ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0",
+                   "torchcodec", "soundfile>=0.12.0"]
+
 
 def download_model(engine, model, log_msg):
     """Download OmniVoice venv + model. Yields SSE messages."""
@@ -23,9 +26,8 @@ def download_model(engine, model, log_msg):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение OmniVoice...'})}\n\n"
         _sp.run([sys.executable, "-m", "venv", OMNIVOICE_VENV], check=True)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
-        from pipeline import _torch_index_args
-        result = _sp.run([pip, "install"] + _torch_index_args() + ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
-                         capture_output=True, text=True, encoding="utf-8")
+        from pipeline import pip_install
+        result = pip_install(pip, _OMNIVOICE_DEPS, quiet=False)
         if result.returncode != 0:
             yield f"data: {_json.dumps({'type': 'error', 'message': f'❌ Ошибка установки: {result.stderr[:500]}'})}\n\n"
             return
@@ -57,16 +59,17 @@ _omnivoice_proc = None  # Persistent worker process
 def _setup_omnivoice_venv(log):
     """Create isolated venv for OmniVoice with transformers>=5.3."""
     from pipeline import venv_ready, mark_venv_ready
+    from pipeline import create_venv, ensure_cuda_torch, pip_install
     if venv_ready(OMNIVOICE_VENV):
+        ensure_cuda_torch(OMNIVOICE_VENV, _OMNIVOICE_DEPS, log)
         return  # Already set up
     log("   📦 Создаю изолированное окружение для OmniVoice...")
-    import subprocess as _sp
-    _sp.run([sys.executable, "-m", "venv", OMNIVOICE_VENV], check=True)
+    create_venv(OMNIVOICE_VENV)
     pip = os.path.join(OMNIVOICE_VENV, _VENV_BIN, "pip")
     log("   📦 Устанавливаю OmniVoice + зависимости...")
-    from pipeline import _torch_index_args
-    _sp.run([pip, "install", "--quiet"] + _torch_index_args() + ["omnivoice>=0.1.3", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcodec", "soundfile>=0.12.0"],
-            check=True, capture_output=True)
+    r = pip_install(pip, _OMNIVOICE_DEPS)
+    if r.returncode != 0:
+        raise RuntimeError(f"Ошибка установки OmniVoice: {(r.stderr or '').strip()[-500:]}")
     mark_venv_ready(OMNIVOICE_VENV)
     log("   ✅ OmniVoice окружение готово")
 

@@ -91,15 +91,14 @@ def _create_venv(log=None):
 
 def _setup_venv(log):
     """Create isolated venv for WhisperX if needed."""
-    from pipeline import venv_ready, mark_venv_ready
+    from pipeline import venv_ready, mark_venv_ready, ensure_cuda_torch, pip_install
     if venv_ready(WHISPERX_VENV):
+        ensure_cuda_torch(WHISPERX_VENV, _WHISPERX_DEPS, log)
         return
     log("   📦 Создаю изолированное окружение WhisperX...")
     _create_venv(log)
     log("   📦 Устанавливаю WhisperX + зависимости...")
-    from pipeline import _torch_index_args
-    result = _sp.run([_get_pip(), "install", "--quiet"] + _torch_index_args() + _WHISPERX_DEPS,
-                     capture_output=True, text=True, encoding="utf-8")
+    result = pip_install(_get_pip(), _WHISPERX_DEPS)
     if result.returncode != 0:
         # Хвост, а не начало: pip кладёт причину в последние строки, а сверху
         # перечисляет отброшенные версии — на 500 символах видно только их
@@ -127,9 +126,8 @@ def download_model(engine, model, log_msg):
             yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
-        from pipeline import _torch_index_args
-        result = _sp.run([_get_pip(), "install"] + _torch_index_args() + _WHISPERX_DEPS,
-                         capture_output=True, text=True, encoding="utf-8")
+        from pipeline import pip_install
+        result = pip_install(_get_pip(), _WHISPERX_DEPS, quiet=False)
         if result.returncode != 0:
             # Хвост, а не начало: причина у pip в последних строках
             yield f"data: {_json.dumps({'type': 'error', 'message': f'Ошибка установки: {result.stderr.strip()[-500:]}'})}\n\n"

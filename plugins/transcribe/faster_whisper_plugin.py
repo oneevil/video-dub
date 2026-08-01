@@ -69,7 +69,8 @@ def _get_python():
 def _has_nvidia_gpu() -> bool:
     """Есть ли видеокарта. Библиотеки CUDA весят около гигабайта, так что на
     машине без неё их качать незачем."""
-    return sys.platform != "darwin" and shutil.which("nvidia-smi") is not None
+    from pipeline import has_nvidia_gpu
+    return has_nvidia_gpu()
 
 
 def _nvidia_lib_dirs() -> list[str]:

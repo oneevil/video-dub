@@ -11,6 +11,8 @@ ENGINES = {"latentsync": "LatentSync (CUDA, высокое качество)"}
 LATENTSYNC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".latentsync")
 LATENTSYNC_VENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".venv-latentsync")
 LATENTSYNC_REPO = "https://github.com/bytedance/LatentSync.git"
+
+_LATENTSYNC_TORCH_DEPS = ["torch>=2.8.0", "torchaudio>=2.8.0", "torchvision", "huggingface-hub"]
 RUNNER_SCRIPT = os.path.join(os.path.dirname(__file__), "_latentsync_runner.py")
 
 
@@ -131,6 +133,10 @@ def setup(log):
 
     # Create venv if needed (marker file indicates completed setup)
     marker = os.path.join(LATENTSYNC_VENV, ".setup_done")
+    if os.path.exists(marker):
+        # Окружение прежней версии могло получить torch без CUDA
+        from pipeline import ensure_cuda_torch
+        ensure_cuda_torch(LATENTSYNC_VENV, _LATENTSYNC_TORCH_DEPS, log)
     if not os.path.exists(marker):
         # Clean up incomplete venv
         if os.path.exists(LATENTSYNC_VENV):
@@ -142,12 +148,9 @@ def setup(log):
         _sp.run([base_py, "-m", "venv", LATENTSYNC_VENV], check=True)
         pip = os.path.join(LATENTSYNC_VENV, _VENV_BIN, "pip")
 
-        from pipeline import _torch_index_args
+        from pipeline import pip_install
         log("   📦 Устанавливаю зависимости (torch)...")
-        result = _sp.run([pip, "install"] + _torch_index_args() + [
-                          "torch>=2.8.0", "torchaudio>=2.8.0", "torchvision",
-                          "huggingface-hub"],
-                         capture_output=True, text=True, encoding="utf-8")
+        result = pip_install(pip, _LATENTSYNC_TORCH_DEPS, quiet=False)
         if result.returncode != 0:
             raise RuntimeError(f"Ошибка установки torch: {result.stderr[:500]}")
 

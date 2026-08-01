@@ -33,12 +33,83 @@ def _detect_cuda_tag():
     return "cu128"
 
 
-def _torch_index_args():
-    """Return pip args for installing CUDA-enabled PyTorch (Windows/Linux)."""
+def _torch_index_url() -> str:
+    """Индекс PyTorch со сборками под CUDA. Пусто на macOS — там CUDA нет."""
     if sys.platform == "darwin":
-        return []
-    tag = _detect_cuda_tag()
-    return ["--extra-index-url", f"https://download.pytorch.org/whl/{tag}"]
+        return ""
+    return f"https://download.pytorch.org/whl/{_detect_cuda_tag()}"
+
+
+_TORCH_PKGS = ("torch", "torchaudio", "torchvision", "torchcodec")
+
+
+def _req_name(spec: str) -> str:
+    """torch>=2.8.0 → torch"""
+    return re.split(r"[<>=!~\[]", spec, maxsplit=1)[0].strip().lower()
+
+
+def has_nvidia_gpu() -> bool:
+    """Есть ли видеокарта NVIDIA."""
+    return sys.platform != "darwin" and shutil.which("nvidia-smi") is not None
+
+
+def pip_install(pip_path: str, packages: list[str], quiet: bool = True, force_torch: bool = False):
+    """Ставит пакеты, проведя torch отдельным шагом через индекс с CUDA.
+
+    Раньше индекс PyTorch добавлялся как --extra-index-url ко всей установке.
+    Так нельзя: приоритета у дополнительного индекса нет, pip выбирает просто
+    наибольшую версию. На PyPI torch всегда свежее, чем на индексе PyTorch
+    (2.13 против 2.9), поэтому оттуда и ставился — а на Windows колесо с PyPI
+    собрано без CUDA, 116 МБ против 2,5 ГБ. Видеокарта «пропадала».
+
+    На Linux ошибки было не видно: тамошние колёса с PyPI и так с CUDA внутри.
+    """
+    base = [pip_path, "install"] + (["--quiet"] if quiet else [])
+    run_kw = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    url = _torch_index_url()
+    torch_pkgs = [p for p in packages if _req_name(p) in _TORCH_PKGS] if url else []
+    rest = [p for p in packages if p not in torch_pkgs]
+
+    result = None
+    if torch_pkgs:
+        # --force-reinstall нужен для починки: уже стоящий torch без CUDA
+        # удовлетворяет условию >=2.8.0, и pip не стал бы его трогать.
+        # Без --no-deps намеренно: на Linux сборка с CUDA тянет пакеты nvidia-*,
+        # и без них она бесполезна. Индекс PyTorch зеркалит и остальные
+        # зависимости, так что исключительный --index-url их не потеряет.
+        extra = ["--force-reinstall"] if force_torch else []
+        result = subprocess.run(base + ["--index-url", url] + extra + torch_pkgs, **run_kw)
+        if result.returncode != 0:
+            return result
+    if rest:
+        result = subprocess.run(base + rest, **run_kw)
+    return result or subprocess.CompletedProcess(base, 0, "", "")
+
+
+def ensure_cuda_torch(venv_path: str, packages: list[str], log=None):
+    """Переставляет torch, если в готовом окружении оказалась сборка без CUDA.
+
+    Окружения, созданные прежней версией, содержат torch с PyPI — на Windows
+    это сборка для процессора. Сами они не починятся: условию `>=2.8.0` она
+    удовлетворяет, и pip проходит мимо.
+    """
+    # По наличию интерпретатора, а не по маркеру готовности: у LatentSync
+    # маркер свой, и проверка по общему молча ничего не делала бы
+    py = venv_python(venv_path)
+    if not has_nvidia_gpu() or not os.path.exists(py):
+        return
+    r = subprocess.run([py, "-c", "import torch, sys; sys.stdout.write(str(torch.version.cuda))"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or r.stdout.strip() not in ("", "None"):
+        return          # torch не установлен или уже с CUDA
+    if log:
+        log("   📦 В окружении torch без CUDA — переставляю сборку под видеокарту...")
+    pip = os.path.join(venv_path, _VENV_BIN, "pip")
+    res = pip_install(pip, [p for p in packages if _req_name(p) in _TORCH_PKGS], force_torch=True)
+    if log:
+        log("   ✅ torch с CUDA установлен" if res.returncode == 0
+            else f"   ⚠️ Не удалось переставить torch: {(res.stderr or '').strip()[-200:]}")
 
 
 # ── Изолированные окружения ───────────────────────────────────────────────────
@@ -670,14 +741,12 @@ _DEMUCS_DEPS = ["demucs>=4.0.0", "torch>=2.8.0", "torchaudio>=2.8.0", "torchcode
 def _setup_demucs_venv(log):
     """Create isolated venv for demucs if needed."""
     if venv_ready(DEMUCS_VENV):
+        ensure_cuda_torch(DEMUCS_VENV, _DEMUCS_DEPS, log)
         return
-    import sys as _sys
     log("   📦 Создаю окружение demucs...")
-    run([_sys.executable, "-m", "venv", DEMUCS_VENV], check=True)
+    create_venv(DEMUCS_VENV)
     log("   📦 Устанавливаю зависимости...")
-    result = run(
-        [os.path.join(DEMUCS_VENV, _VENV_BIN, "pip"), "install", "--quiet"] + _torch_index_args() + _DEMUCS_DEPS,
-        capture_output=True, text=True, encoding="utf-8")
+    result = pip_install(os.path.join(DEMUCS_VENV, _VENV_BIN, "pip"), _DEMUCS_DEPS)
     if result.returncode != 0:
         raise ProcessingError(f"Ошибка установки demucs: {result.stderr[:500]}")
     mark_venv_ready(DEMUCS_VENV)
