@@ -139,6 +139,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      # Описание выпуска лежит в репозитории. Забираем его до артефактов:
+      # checkout вычищает рабочую папку и снёс бы уже скачанные файлы
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -147,15 +154,4 @@ jobs:
         with:
           files: artifacts/**/*
           generate_release_notes: true
-          body: |
-            ## Установка
-
-            | Система | Файл | Что делать |
-            |---|---|---|
-            | **Windows** | `Video-Dub-*-setup.exe` | Запустить установщик |
-            | **macOS** | `Video-Dub-*.dmg` | Открыть, перетащить в Applications, запустить |
-            | **Linux** | `install.sh` | `curl -LsSf .../install.sh \| bash`, затем `video-dub` |
-
-            При первом запуске приложение само скачает Python, ffmpeg и ML-библиотеки —
-            это несколько минут и несколько гигабайт. Модели распознавания и озвучки
-            качаются отдельно из настроек.
+          body_path: RELEASE_NOTES.md
