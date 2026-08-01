@@ -56,42 +56,44 @@ def venv_ready(venv_path: str) -> bool:
             and os.path.exists(venv_python(venv_path)))
 
 
-def base_python(max_minor: int, log=None) -> str:
-    """Интерпретатор для изолированного окружения с потолком версии Python.
+def create_venv(venv_path: str, max_minor: int | None = None, log=None):
+    """Создаёт изолированное окружение с pip внутри.
 
-    Приложение живёт на самом свежем Python, а библиотеки за ним не поспевают:
-    whisperx, например, требует <3.14. Окружение из sys.executable в этом случае
-    бесполезно — pip отвергает все версии пакета, жалуясь на requires-python.
+    max_minor — потолок версии Python для библиотеки. Приложение живёт на самом
+    свежем интерпретаторе, а библиотеки за ним не поспевают: whisperx требует
+    <3.14, и окружение из sys.executable бесполезно — pip отвергает все версии
+    пакета, жалуясь на requires-python.
 
-    Ищем в порядке «меньше вмешательства»: текущий интерпретатор → уже
-    установленные версии → скачивание через uv.
+    Подходящий Python ищет и при необходимости скачивает uv, он же собирает
+    окружение: одна команда вместо связки «найти → установить → создать», где
+    каждый шаг мог отвалиться молча.
     """
-    if sys.version_info.minor <= max_minor:
-        return sys.executable
+    if max_minor is None or sys.version_info.minor <= max_minor:
+        subprocess.run([sys.executable, "-m", "venv", venv_path], check=True)
+        return
 
     want = f"3.{max_minor}"
-    found = shutil.which(f"python{want}")
-    if found:
-        return found
-
     uv = shutil.which("uv")
-    if uv:
-        r = subprocess.run([uv, "python", "find", want], capture_output=True, text=True, encoding="utf-8")
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-        if log:
-            log(f"   📦 Скачиваю Python {want} (нужен этой библиотеке)...")
-        if subprocess.run([uv, "python", "install", want], capture_output=True, text=True,
-                          encoding="utf-8").returncode == 0:
-            r = subprocess.run([uv, "python", "find", want], capture_output=True, text=True, encoding="utf-8")
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
-
-    raise ProcessingError(
-        f"Нужен Python {want}: текущий {sys.version_info.major}.{sys.version_info.minor} "
-        f"эта библиотека не поддерживает.\n"
-        f"   Поставьте его вручную: uv python install {want}"
-    )
+    if not uv:
+        raise ProcessingError(
+            f"Нужен Python {want}: текущий {sys.version_info.major}.{sys.version_info.minor} "
+            f"эта библиотека не поддерживает, а uv для установки не найден.\n"
+            f"   Поставьте вручную: uv python install {want}"
+        )
+    if log:
+        log(f"   📦 Готовлю Python {want} — на {sys.version_info.major}.{sys.version_info.minor} "
+            f"эта библиотека не ставится...")
+    # --seed: без него в окружении не будет pip, а плагины ставят зависимости им.
+    # errors="replace": на Windows uv пишет в кодировке консоли, и строгое
+    # декодирование обрывало бы установку из-за сообщения об ошибке
+    r = subprocess.run([uv, "venv", "--python", want, "--seed", venv_path],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip()[-400:]
+        raise ProcessingError(
+            f"не удалось создать окружение на Python {want}:\n   {detail}\n"
+            f"   Можно поставить вручную: uv python install {want}"
+        )
 
 
 def mark_venv_ready(venv_path: str):

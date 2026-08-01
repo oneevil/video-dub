@@ -77,15 +77,16 @@ def _get_pip():
     return os.path.join(WHISPERX_VENV, _VENV_BIN, "pip")
 
 
-def _create_venv(python: str):
+def _create_venv(log=None):
     """Создаёт окружение с нуля.
 
     Недостроенное окружение сносим: если прошлая попытка сорвалась на другой
     версии Python, venv поверх неё оставит вперемешку старые и новые файлы.
     """
     import shutil as _shutil
+    from pipeline import create_venv
     _shutil.rmtree(WHISPERX_VENV, ignore_errors=True)
-    _sp.run([python, "-m", "venv", WHISPERX_VENV], check=True)
+    create_venv(WHISPERX_VENV, _MAX_PY_MINOR, log)
 
 
 def _setup_venv(log):
@@ -94,8 +95,7 @@ def _setup_venv(log):
     if venv_ready(WHISPERX_VENV):
         return
     log("   📦 Создаю изолированное окружение WhisperX...")
-    from pipeline import base_python
-    _create_venv(base_python(_MAX_PY_MINOR, log))
+    _create_venv(log)
     log("   📦 Устанавливаю WhisperX + зависимости...")
     from pipeline import _torch_index_args
     result = _sp.run([_get_pip(), "install", "--quiet"] + _torch_index_args() + _WHISPERX_DEPS,
@@ -119,15 +119,13 @@ def download_model(engine, model, log_msg):
     from pipeline import venv_ready, mark_venv_ready
     if not venv_ready(WHISPERX_VENV):
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Создаю окружение WhisperX...'})}\n\n"
-        from pipeline import base_python
         if sys.version_info.minor > _MAX_PY_MINOR:
             yield f"data: {_json.dumps({'type': 'log', 'message': f'📦 Готовлю Python 3.{_MAX_PY_MINOR} — WhisperX не поддерживает 3.{sys.version_info.minor}...'})}\n\n"
         try:
-            py = base_python(_MAX_PY_MINOR)
+            _create_venv()
         except Exception as e:
             yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
-        _create_venv(py)
         yield f"data: {_json.dumps({'type': 'log', 'message': '📦 Устанавливаю зависимости...'})}\n\n"
         from pipeline import _torch_index_args
         result = _sp.run([_get_pip(), "install"] + _torch_index_args() + _WHISPERX_DEPS,
