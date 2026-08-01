@@ -60,6 +60,13 @@ $Port       = if ($env:PORT) { $env:PORT } else { '5050' }
 New-Item -ItemType Directory -Force -Path $RuntimeBin | Out-Null
 $env:PATH = "$RuntimeBin;$env:PATH"
 
+# Интерпретаторы, которые качает uv, держим рядом с приложением, а не в
+# AppData\Roaming. Там они не только переживают удаление программы, но и
+# попадают под перенаправление профиля: Windows отказывает в проходе по такому
+# пути («недоверенная точка подключения», os error 448), и ломается любая
+# команда uv, включая uv sync.
+$env:UV_PYTHON_INSTALL_DIR = Join-Path $RuntimeDir 'python'
+
 function Ensure-Uv {
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         Ok "uv найден: $(uv --version)"

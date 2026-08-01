@@ -17,6 +17,10 @@ PORT="${PORT:-5050}"
 mkdir -p "$RUNTIME_BIN"
 export PATH="$RUNTIME_BIN:$PATH"
 
+# Интерпретаторы, которые качает uv, держим рядом с приложением: удаление папки
+# должно уносить с собой всё, что мы доустановили
+export UV_PYTHON_INSTALL_DIR="$RUNTIME_DIR/python"
+
 case "$(uname -s)" in
   Darwin) OS=macos ;;
   Linux)  OS=linux ;;
