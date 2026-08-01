@@ -1,6 +1,6 @@
 [project]
 name = "video-dub"
-version = "0.2.2"
+version = "0.2.3"
 description = "GUI app for automatic video translation with dubbing"
 requires-python = ">=3.12"
 dependencies = [
