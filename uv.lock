@@ -1402,7 +1402,7 @@ wheels = [
 
 [[package]]
 name = "video-dub"
-version = "0.2.4"
+version = "0.2.5"
 source = { virtual = "." }
 dependencies = [
     { name = "anthropic" },
